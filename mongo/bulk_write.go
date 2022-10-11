@@ -39,6 +39,9 @@ type bulkWrite struct {
 	let                      interface{}
 }
 
+// Result returns the result of executing this operation.
+func (bw *bulkWrite) Result() BulkWriteResult { return bw.result }
+
 func (bw *bulkWrite) execute(ctx context.Context) error {
 	ordered := true
 	if bw.ordered != nil {

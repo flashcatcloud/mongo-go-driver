@@ -230,6 +230,10 @@ func (coll *Collection) BulkWrite(ctx context.Context, models []WriteModel,
 		let:                      bwo.Let,
 	}
 
+	defer func(s time.Time) {
+		slog(ctx, "bulkWrite", coll.db.name, coll.name, "", time.Since(s), op.Result(), err)
+	}(time.Now())
+
 	err = op.execute(ctx)
 
 	return &op.result, replaceErrors(err)
@@ -244,6 +248,7 @@ func (coll *Collection) insert(ctx context.Context, documents []interface{},
 
 	result := make([]interface{}, len(documents))
 	docs := make([]bsoncore.Document, len(documents))
+	docsStr := make([]string, len(documents))
 
 	for i, doc := range documents {
 		var err error
@@ -251,6 +256,8 @@ func (coll *Collection) insert(ctx context.Context, documents []interface{},
 		if err != nil {
 			return nil, err
 		}
+
+		docsStr[i] = docs[i].String()
 	}
 
 	sess := sessionFromContext(ctx)
@@ -303,6 +310,10 @@ func (coll *Collection) insert(ctx context.Context, documents []interface{},
 		retry = driver.RetryOncePerCommand
 	}
 	op = op.Retry(retry)
+
+	defer func(s time.Time) {
+		slog(ctx, "insert", coll.db.name, coll.name, strings.Join(docsStr, ","), time.Since(s), op.Result(), err)
+	}(time.Now())
 
 	err = op.Execute(ctx)
 	wce, ok := err.(driver.WriteCommandError)
@@ -488,6 +499,11 @@ func (coll *Collection) delete(ctx context.Context, filter interface{}, deleteOn
 		retryMode = driver.RetryOncePerCommand
 	}
 	op = op.Retry(retryMode)
+
+	defer func(s time.Time) {
+		slog(ctx, "delete", coll.db.name, coll.name, f.String(), time.Since(s), op.Result(), err)
+	}(time.Now())
+
 	rr, err := processWriteError(op.Execute(ctx))
 	if rr&expectedRr == 0 {
 		return nil, err
@@ -600,8 +616,12 @@ func (coll *Collection) updateOrReplace(ctx context.Context, filter bsoncore.Doc
 		retry = driver.RetryOncePerCommand
 	}
 	op = op.Retry(retry)
-	err = op.Execute(ctx)
 
+	defer func(s time.Time) {
+		slog(ctx, "updateOrReplace", coll.db.name, coll.name, updateDoc.String(), time.Since(s), op.Result(), err)
+	}(time.Now())
+
+	err = op.Execute(ctx)
 	rr, err := processWriteError(err)
 	if rr&expectedRr == 0 {
 		return nil, err
@@ -613,6 +633,7 @@ func (coll *Collection) updateOrReplace(ctx context.Context, filter bsoncore.Doc
 		ModifiedCount: opRes.NModified,
 		UpsertedCount: int64(len(opRes.Upserted)),
 	}
+
 	if len(opRes.Upserted) > 0 {
 		res.UpsertedID = opRes.Upserted[0].ID
 		res.MatchedCount--
@@ -910,6 +931,10 @@ func aggregate(a aggregateParams) (cur *Cursor, err error) {
 	}
 	op = op.Retry(retry)
 
+	defer func(s time.Time) {
+		slog(a.ctx, "aggregate", a.db, a.col, pipelineArr.String(), time.Since(s), 0, err)
+	}(time.Now())
+
 	err = op.Execute(a.ctx)
 	if err != nil {
 		if wce, ok := err.(driver.WriteCommandError); ok && wce.WriteConcernError != nil {
@@ -988,6 +1013,10 @@ func (coll *Collection) CountDocuments(ctx context.Context, filter interface{},
 		retry = driver.RetryOncePerCommand
 	}
 	op = op.Retry(retry)
+
+	defer func(s time.Time) {
+		slog(ctx, "count", coll.db.name, coll.name, pipelineArr.String(), time.Since(s), 0, err)
+	}(time.Now())
 
 	err = op.Execute(ctx)
 	if err != nil {
@@ -1070,6 +1099,10 @@ func (coll *Collection) EstimatedDocumentCount(ctx context.Context,
 	}
 	op.Retry(retry)
 
+	defer func(s time.Time) {
+		slog(ctx, "estimatedCount", coll.db.name, coll.name, "", time.Since(s), op.Result(), err)
+	}(time.Now())
+
 	err = op.Execute(ctx)
 	return op.Result().N, replaceErrors(err)
 }
@@ -1141,6 +1174,10 @@ func (coll *Collection) Distinct(ctx context.Context, fieldName string, filter i
 		retry = driver.RetryOncePerCommand
 	}
 	op = op.Retry(retry)
+
+	defer func(s time.Time) {
+		slog(ctx, "distinct", coll.db.name, coll.name, f.String(), time.Since(s), 0, err)
+	}(time.Now())
 
 	err = op.Execute(ctx)
 	if err != nil {
@@ -1335,6 +1372,10 @@ func (coll *Collection) Find(ctx context.Context, filter interface{},
 	}
 	op = op.Retry(retry)
 
+	defer func(s time.Time) {
+		slog(ctx, "find", coll.db.name, coll.name, f.String(), time.Since(s), 0, err)
+	}(time.Now())
+
 	if err = op.Execute(ctx); err != nil {
 		return nil, replaceErrors(err)
 	}
@@ -1441,6 +1482,10 @@ func (coll *Collection) findAndModify(ctx context.Context, op *operation.FindAnd
 		Deployment(coll.client.deployment).
 		Retry(retry).
 		Crypt(coll.client.cryptFLE)
+
+	defer func(s time.Time) {
+		slog(ctx, "findAndModify", coll.db.name, coll.name, "", time.Since(s), 0, err)
+	}(time.Now())
 
 	_, err = processWriteError(op.Execute(ctx))
 	if err != nil {
@@ -1826,6 +1871,11 @@ func (coll *Collection) drop(ctx context.Context) error {
 		Database(coll.db.name).Collection(coll.name).
 		Deployment(coll.client.deployment).Crypt(coll.client.cryptFLE).
 		ServerAPI(coll.client.serverAPI).Timeout(coll.client.timeout)
+
+	defer func(s time.Time) {
+		slog(ctx, "drop", coll.db.name, coll.name, "", time.Since(s), op.Result(), err)
+	}(time.Now())
+
 	err = op.Execute(ctx)
 
 	// ignore namespace not found erorrs
