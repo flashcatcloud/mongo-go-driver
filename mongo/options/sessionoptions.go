@@ -95,37 +95,3 @@ func (s *SessionOptions) SetSnapshot(b bool) *SessionOptions {
 	s.Snapshot = &b
 	return s
 }
-
-// MergeSessionOptions combines the given SessionOptions instances into a single SessionOptions in a last-one-wins
-// fashion.
-func MergeSessionOptions(opts ...*SessionOptions) *SessionOptions {
-	s := Session()
-	for _, opt := range opts {
-		if opt == nil {
-			continue
-		}
-		if opt.CausalConsistency != nil {
-			s.CausalConsistency = opt.CausalConsistency
-		}
-		if opt.DefaultReadConcern != nil {
-			s.DefaultReadConcern = opt.DefaultReadConcern
-		}
-		if opt.DefaultReadPreference != nil {
-			s.DefaultReadPreference = opt.DefaultReadPreference
-		}
-		if opt.DefaultWriteConcern != nil {
-			s.DefaultWriteConcern = opt.DefaultWriteConcern
-		}
-		if opt.DefaultMaxCommitTime != nil {
-			s.DefaultMaxCommitTime = opt.DefaultMaxCommitTime
-		}
-		if opt.Snapshot != nil {
-			s.Snapshot = opt.Snapshot
-		}
-	}
-	if s.CausalConsistency == nil && (s.Snapshot == nil || !*s.Snapshot) {
-		s.CausalConsistency = &DefaultCausalConsistency
-	}
-
-	return s
-}

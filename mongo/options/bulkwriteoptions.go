@@ -64,28 +64,3 @@ func (b *BulkWriteOptions) SetLet(let interface{}) *BulkWriteOptions {
 	b.Let = &let
 	return b
 }
-
-// MergeBulkWriteOptions combines the given BulkWriteOptions instances into a single BulkWriteOptions in a last-one-wins
-// fashion.
-func MergeBulkWriteOptions(opts ...*BulkWriteOptions) *BulkWriteOptions {
-	b := BulkWrite()
-	for _, opt := range opts {
-		if opt == nil {
-			continue
-		}
-		if opt.Comment != nil {
-			b.Comment = opt.Comment
-		}
-		if opt.Ordered != nil {
-			b.Ordered = opt.Ordered
-		}
-		if opt.BypassDocumentValidation != nil {
-			b.BypassDocumentValidation = opt.BypassDocumentValidation
-		}
-		if opt.Let != nil {
-			b.Let = opt.Let
-		}
-	}
-
-	return b
-}

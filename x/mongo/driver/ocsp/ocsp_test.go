@@ -16,7 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/internal/assert"
+	"go.mongodb.org/mongo-driver/internal/httputil"
 )
 
 func TestContactResponders(t *testing.T) {
@@ -33,6 +34,7 @@ func TestContactResponders(t *testing.T) {
 			serverCert: serverCert,
 			issuer:     &x509.Certificate{},
 			cache:      NewCache(),
+			httpClient: httputil.DefaultHTTPClient,
 		}
 
 		res := contactResponders(ctx, cfg)
@@ -57,6 +59,7 @@ func TestContactResponders(t *testing.T) {
 			serverCert: serverCert,
 			issuer:     &x509.Certificate{},
 			cache:      NewCache(),
+			httpClient: httputil.DefaultHTTPClient,
 		}
 
 		// Expect that contactResponders() returns a nil response but does not cause any errors when

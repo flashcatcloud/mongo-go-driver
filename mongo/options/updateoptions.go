@@ -93,36 +93,3 @@ func (uo *UpdateOptions) SetLet(l interface{}) *UpdateOptions {
 	uo.Let = l
 	return uo
 }
-
-// MergeUpdateOptions combines the given UpdateOptions instances into a single UpdateOptions in a last-one-wins fashion.
-func MergeUpdateOptions(opts ...*UpdateOptions) *UpdateOptions {
-	uOpts := Update()
-	for _, uo := range opts {
-		if uo == nil {
-			continue
-		}
-		if uo.ArrayFilters != nil {
-			uOpts.ArrayFilters = uo.ArrayFilters
-		}
-		if uo.BypassDocumentValidation != nil {
-			uOpts.BypassDocumentValidation = uo.BypassDocumentValidation
-		}
-		if uo.Collation != nil {
-			uOpts.Collation = uo.Collation
-		}
-		if uo.Comment != nil {
-			uOpts.Comment = uo.Comment
-		}
-		if uo.Hint != nil {
-			uOpts.Hint = uo.Hint
-		}
-		if uo.Upsert != nil {
-			uOpts.Upsert = uo.Upsert
-		}
-		if uo.Let != nil {
-			uOpts.Let = uo.Let
-		}
-	}
-
-	return uOpts
-}

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/bsoncodec"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
@@ -84,34 +83,6 @@ func (b *BucketOptions) SetReadPreference(rp *readpref.ReadPref) *BucketOptions 
 	return b
 }
 
-// MergeBucketOptions combines the given BucketOptions instances into a single BucketOptions in a last-one-wins fashion.
-func MergeBucketOptions(opts ...*BucketOptions) *BucketOptions {
-	b := GridFSBucket()
-
-	for _, opt := range opts {
-		if opt == nil {
-			continue
-		}
-		if opt.Name != nil {
-			b.Name = opt.Name
-		}
-		if opt.ChunkSizeBytes != nil {
-			b.ChunkSizeBytes = opt.ChunkSizeBytes
-		}
-		if opt.WriteConcern != nil {
-			b.WriteConcern = opt.WriteConcern
-		}
-		if opt.ReadConcern != nil {
-			b.ReadConcern = opt.ReadConcern
-		}
-		if opt.ReadPreference != nil {
-			b.ReadPreference = opt.ReadPreference
-		}
-	}
-
-	return b
-}
-
 // UploadOptions represents options that can be used to configure a GridFS upload operation.
 type UploadOptions struct {
 	// The number of bytes in each chunk in the bucket. The default value is DefaultChunkSize (255 KiB).
@@ -123,7 +94,7 @@ type UploadOptions struct {
 	Metadata interface{}
 
 	// The BSON registry to use for converting filters to BSON documents. The default value is bson.DefaultRegistry.
-	Registry *bsoncodec.Registry
+	Registry *bson.Registry
 }
 
 // GridFSUpload creates a new UploadOptions instance.
@@ -140,28 +111,6 @@ func (u *UploadOptions) SetChunkSizeBytes(i int32) *UploadOptions {
 // SetMetadata sets the value for the Metadata field.
 func (u *UploadOptions) SetMetadata(doc interface{}) *UploadOptions {
 	u.Metadata = doc
-	return u
-}
-
-// MergeUploadOptions combines the given UploadOptions instances into a single UploadOptions in a last-one-wins fashion.
-func MergeUploadOptions(opts ...*UploadOptions) *UploadOptions {
-	u := GridFSUpload()
-
-	for _, opt := range opts {
-		if opt == nil {
-			continue
-		}
-		if opt.ChunkSizeBytes != nil {
-			u.ChunkSizeBytes = opt.ChunkSizeBytes
-		}
-		if opt.Metadata != nil {
-			u.Metadata = opt.Metadata
-		}
-		if opt.Registry != nil {
-			u.Registry = opt.Registry
-		}
-	}
-
 	return u
 }
 
@@ -188,23 +137,6 @@ func GridFSName() *NameOptions {
 // SetRevision sets the value for the Revision field.
 func (n *NameOptions) SetRevision(r int32) *NameOptions {
 	n.Revision = &r
-	return n
-}
-
-// MergeNameOptions combines the given NameOptions instances into a single *NameOptions in a last-one-wins fashion.
-func MergeNameOptions(opts ...*NameOptions) *NameOptions {
-	n := GridFSName()
-	n.Revision = &DefaultRevision
-
-	for _, opt := range opts {
-		if opt == nil {
-			continue
-		}
-		if opt.Revision != nil {
-			n.Revision = opt.Revision
-		}
-	}
-
 	return n
 }
 
@@ -292,38 +224,4 @@ func (f *GridFSFindOptions) SetSkip(i int32) *GridFSFindOptions {
 func (f *GridFSFindOptions) SetSort(sort interface{}) *GridFSFindOptions {
 	f.Sort = sort
 	return f
-}
-
-// MergeGridFSFindOptions combines the given GridFSFindOptions instances into a single GridFSFindOptions in a
-// last-one-wins fashion.
-func MergeGridFSFindOptions(opts ...*GridFSFindOptions) *GridFSFindOptions {
-	fo := GridFSFind()
-	for _, opt := range opts {
-		if opt == nil {
-			continue
-		}
-		if opt.AllowDiskUse != nil {
-			fo.AllowDiskUse = opt.AllowDiskUse
-		}
-		if opt.BatchSize != nil {
-			fo.BatchSize = opt.BatchSize
-		}
-		if opt.Limit != nil {
-			fo.Limit = opt.Limit
-		}
-		if opt.MaxTime != nil {
-			fo.MaxTime = opt.MaxTime
-		}
-		if opt.NoCursorTimeout != nil {
-			fo.NoCursorTimeout = opt.NoCursorTimeout
-		}
-		if opt.Skip != nil {
-			fo.Skip = opt.Skip
-		}
-		if opt.Sort != nil {
-			fo.Sort = opt.Sort
-		}
-	}
-
-	return fo
 }

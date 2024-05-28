@@ -7,12 +7,10 @@
 package options
 
 import (
-	"fmt"
-	"reflect"
+	"bytes"
 	"strconv"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/bsoncodec"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 )
 
@@ -31,6 +29,8 @@ type Collation struct {
 }
 
 // ToDocument converts the Collation to a bson.Raw.
+//
+// Deprecated: Marshaling a Collation to BSON will not be supported in Go Driver 2.0.
 func (co *Collation) ToDocument() bson.Raw {
 	idx, doc := bsoncore.AppendDocumentStart(nil)
 	if co.Locale != "" {
@@ -102,37 +102,55 @@ const (
 	// UpdateLookup includes a delta describing the changes to the document and a copy of the entire document that
 	// was changed.
 	UpdateLookup FullDocument = "updateLookup"
-	// WhenAvailable includes a post-image of the the modified document for replace and update change events
+	// WhenAvailable includes a post-image of the modified document for replace and update change events
 	// if the post-image for this event is available.
 	WhenAvailable FullDocument = "whenAvailable"
 )
 
+// TODO(GODRIVER-2617): Once Registry is removed, ArrayFilters doesn't need to
+// TODO be a separate type. Remove the type and update all ArrayFilters fields
+// TODO to be type []interface{}.
+
 // ArrayFilters is used to hold filters for the array filters CRUD option. If a registry is nil, bson.DefaultRegistry
 // will be used when converting the filter interfaces to BSON.
 type ArrayFilters struct {
-	Registry *bsoncodec.Registry // The registry to use for converting filters. Defaults to bson.DefaultRegistry.
-	Filters  []interface{}       // The filters to apply
+	// Registry is the registry to use for converting filters. Defaults to bson.DefaultRegistry.
+	//
+	// Deprecated: Marshaling ArrayFilters to BSON will not be supported in Go Driver 2.0.
+	Registry *bson.Registry
+
+	Filters []interface{} // The filters to apply
 }
 
 // ToArray builds a []bson.Raw from the provided ArrayFilters.
+//
+// Deprecated: Marshaling ArrayFilters to BSON will not be supported in Go Driver 2.0.
 func (af *ArrayFilters) ToArray() ([]bson.Raw, error) {
 	registry := af.Registry
 	if registry == nil {
 		registry = bson.DefaultRegistry
 	}
 	filters := make([]bson.Raw, 0, len(af.Filters))
+	buf := new(bytes.Buffer)
+	enc := new(bson.Encoder)
 	for _, f := range af.Filters {
-		filter, err := bson.MarshalWithRegistry(registry, f)
+		buf.Reset()
+		vw := bson.NewValueWriter(buf)
+		enc.Reset(vw)
+		enc.SetRegistry(registry)
+		err := enc.Encode(f)
 		if err != nil {
 			return nil, err
 		}
-		filters = append(filters, filter)
+		filters = append(filters, buf.Bytes())
 	}
 	return filters, nil
 }
 
 // ToArrayDocument builds a BSON array for the array filters CRUD option. If the registry for af is nil,
 // bson.DefaultRegistry will be used when converting the filter interfaces to BSON.
+//
+// Deprecated: Marshaling ArrayFilters to BSON will not be supported in Go Driver 2.0.
 func (af *ArrayFilters) ToArrayDocument() (bson.Raw, error) {
 	registry := af.Registry
 	if registry == nil {
@@ -140,26 +158,20 @@ func (af *ArrayFilters) ToArrayDocument() (bson.Raw, error) {
 	}
 
 	idx, arr := bsoncore.AppendArrayStart(nil)
+	buf := new(bytes.Buffer)
+	enc := new(bson.Encoder)
 	for i, f := range af.Filters {
-		filter, err := bson.MarshalWithRegistry(registry, f)
+		buf.Reset()
+		vw := bson.NewValueWriter(buf)
+		enc.Reset(vw)
+		enc.SetRegistry(registry)
+		err := enc.Encode(f)
 		if err != nil {
 			return nil, err
 		}
 
-		arr = bsoncore.AppendDocumentElement(arr, strconv.Itoa(i), filter)
+		arr = bsoncore.AppendDocumentElement(arr, strconv.Itoa(i), buf.Bytes())
 	}
 	arr, _ = bsoncore.AppendArrayEnd(arr, idx)
 	return arr, nil
-}
-
-// MarshalError is returned when attempting to transform a value into a document
-// results in an error.
-type MarshalError struct {
-	Value interface{}
-	Err   error
-}
-
-// Error implements the error interface.
-func (me MarshalError) Error() string {
-	return fmt.Sprintf("cannot transform type %s to a bson.Raw", reflect.TypeOf(me.Value))
 }

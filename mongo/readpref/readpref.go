@@ -5,7 +5,7 @@
 // a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 
 // Package readpref defines read preferences for MongoDB queries.
-package readpref // import "go.mongodb.org/mongo-driver/mongo/readpref"
+package readpref
 
 import (
 	"bytes"
@@ -20,11 +20,9 @@ var (
 	errInvalidReadPreference = errors.New("can not specify tags, max staleness, or hedge with mode primary")
 )
 
-var primary = ReadPref{mode: PrimaryMode}
-
 // Primary constructs a read preference with a PrimaryMode.
 func Primary() *ReadPref {
-	return &primary
+	return &ReadPref{mode: PrimaryMode}
 }
 
 // PrimaryPreferred constructs a read preference with a PrimaryPreferredMode.

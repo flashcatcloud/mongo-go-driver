@@ -11,8 +11,8 @@ import (
 	"errors"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson/bsontype"
 	"go.mongodb.org/mongo-driver/event"
+	"go.mongodb.org/mongo-driver/internal/driverutil"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
@@ -105,6 +105,7 @@ func (d *Distinct) Execute(ctx context.Context) error {
 		Selector:          d.selector,
 		ServerAPI:         d.serverAPI,
 		Timeout:           d.timeout,
+		Name:              driverutil.DistinctOp,
 	}.Execute(ctx)
 
 }
@@ -117,7 +118,7 @@ func (d *Distinct) command(dst []byte, desc description.SelectedServer) ([]byte,
 		}
 		dst = bsoncore.AppendDocumentElement(dst, "collation", d.collation)
 	}
-	if d.comment.Type != bsontype.Type(0) {
+	if d.comment.Type != bsoncore.Type(0) {
 		dst = bsoncore.AppendValueElement(dst, "comment", d.comment)
 	}
 	if d.key != nil {

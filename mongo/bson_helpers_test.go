@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/internal/assert"
 )
 
 // compare expected and actual BSON documents. comparison succeeds if actual contains each element in expected.
@@ -61,7 +61,7 @@ func compareBsonValues(t *testing.T, key string, expected, actual bson.RawValue)
 	case bson.TypeEmbeddedDocument:
 		compareDocuments(t, expected.Document(), actual.Document())
 	case bson.TypeArray:
-		compareDocuments(t, expected.Array(), actual.Array())
+		compareDocuments(t, bson.Raw(expected.Array()), bson.Raw(actual.Array()))
 	default:
 		assert.Equal(t, expected.Value, actual.Value,
 			"value mismatch for key %v; expected %v, got %v", key, expected.Value, actual.Value)

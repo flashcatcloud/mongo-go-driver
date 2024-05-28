@@ -8,6 +8,9 @@ package options
 
 import (
 	"crypto/tls"
+	"net/http"
+
+	"go.mongodb.org/mongo-driver/internal/httputil"
 )
 
 // AutoEncryptionOptions represents options used to configure auto encryption/decryption behavior for a mongo.Client
@@ -32,13 +35,16 @@ type AutoEncryptionOptions struct {
 	BypassAutoEncryption  *bool
 	ExtraOptions          map[string]interface{}
 	TLSConfig             map[string]*tls.Config
+	HTTPClient            *http.Client
 	EncryptedFieldsMap    map[string]interface{}
 	BypassQueryAnalysis   *bool
 }
 
 // AutoEncryption creates a new AutoEncryptionOptions configured with default values.
 func AutoEncryption() *AutoEncryptionOptions {
-	return &AutoEncryptionOptions{}
+	return &AutoEncryptionOptions{
+		HTTPClient: httputil.DefaultHTTPClient,
+	}
 }
 
 // SetKeyVaultClientOptions specifies options for the client used to communicate with the key vault collection.
@@ -145,7 +151,6 @@ func (a *AutoEncryptionOptions) SetTLSConfig(tlsOpts map[string]*tls.Config) *Au
 
 // SetEncryptedFieldsMap specifies a map from namespace to local EncryptedFieldsMap document.
 // EncryptedFieldsMap is used for Queryable Encryption.
-// Queryable Encryption is in Public Technical Preview. Queryable Encryption should not be used in production and is subject to backwards breaking changes.
 func (a *AutoEncryptionOptions) SetEncryptedFieldsMap(ef map[string]interface{}) *AutoEncryptionOptions {
 	a.EncryptedFieldsMap = ef
 	return a
@@ -153,48 +158,7 @@ func (a *AutoEncryptionOptions) SetEncryptedFieldsMap(ef map[string]interface{})
 
 // SetBypassQueryAnalysis specifies whether or not query analysis should be used for automatic encryption.
 // Use this option when using explicit encryption with Queryable Encryption.
-// Queryable Encryption is in Public Technical Preview. Queryable Encryption should not be used in production and is subject to backwards breaking changes.
 func (a *AutoEncryptionOptions) SetBypassQueryAnalysis(bypass bool) *AutoEncryptionOptions {
 	a.BypassQueryAnalysis = &bypass
 	return a
-}
-
-// MergeAutoEncryptionOptions combines the argued AutoEncryptionOptions in a last-one wins fashion.
-func MergeAutoEncryptionOptions(opts ...*AutoEncryptionOptions) *AutoEncryptionOptions {
-	aeo := AutoEncryption()
-	for _, opt := range opts {
-		if opt == nil {
-			continue
-		}
-
-		if opt.KeyVaultClientOptions != nil {
-			aeo.KeyVaultClientOptions = opt.KeyVaultClientOptions
-		}
-		if opt.KeyVaultNamespace != "" {
-			aeo.KeyVaultNamespace = opt.KeyVaultNamespace
-		}
-		if opt.KmsProviders != nil {
-			aeo.KmsProviders = opt.KmsProviders
-		}
-		if opt.SchemaMap != nil {
-			aeo.SchemaMap = opt.SchemaMap
-		}
-		if opt.BypassAutoEncryption != nil {
-			aeo.BypassAutoEncryption = opt.BypassAutoEncryption
-		}
-		if opt.ExtraOptions != nil {
-			aeo.ExtraOptions = opt.ExtraOptions
-		}
-		if opt.TLSConfig != nil {
-			aeo.TLSConfig = opt.TLSConfig
-		}
-		if opt.EncryptedFieldsMap != nil {
-			aeo.EncryptedFieldsMap = opt.EncryptedFieldsMap
-		}
-		if opt.BypassQueryAnalysis != nil {
-			aeo.BypassQueryAnalysis = opt.BypassQueryAnalysis
-		}
-	}
-
-	return aeo
 }

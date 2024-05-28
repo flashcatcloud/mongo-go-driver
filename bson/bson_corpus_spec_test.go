@@ -7,12 +7,13 @@
 package bson
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math"
 	"os"
 	"path"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -20,10 +21,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/stretchr/testify/require"
-	"github.com/tidwall/pretty"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/internal/assert"
+	"go.mongodb.org/mongo-driver/internal/require"
 )
 
 type testCase struct {
@@ -184,26 +183,6 @@ func unescapeUnicode(s, bsonType string) string {
 	return newS
 }
 
-func formatDouble(f float64) string {
-	var s string
-	if math.IsInf(f, 1) {
-		s = "Infinity"
-	} else if math.IsInf(f, -1) {
-		s = "-Infinity"
-	} else if math.IsNaN(f) {
-		s = "NaN"
-	} else {
-		// Print exactly one decimalType place for integers; otherwise, print as many are necessary to
-		// perfectly represent it.
-		s = strconv.FormatFloat(f, 'G', -1, 64)
-		if !strings.ContainsRune(s, 'E') && !strings.ContainsRune(s, '.') {
-			s += ".0"
-		}
-	}
-
-	return s
-}
-
 func normalizeCanonicalDouble(t *testing.T, key string, cEJ string) string {
 	// Unmarshal string into map
 	cEJMap := make(map[string]map[string]string)
@@ -312,7 +291,9 @@ func runTest(t *testing.T, file string) {
 					expectNoError(t, err, fmt.Sprintf("%s: reading canonical BSON", v.Description))
 
 					// get canonical extended JSON
-					cEJ := unescapeUnicode(string(pretty.Ugly([]byte(v.CanonicalExtJSON))), test.BsonType)
+					var compactEJ bytes.Buffer
+					require.NoError(t, json.Compact(&compactEJ, []byte(v.CanonicalExtJSON)))
+					cEJ := unescapeUnicode(compactEJ.String(), test.BsonType)
 					if test.BsonType == "0x01" {
 						cEJ = normalizeCanonicalDouble(t, *test.TestKey, cEJ)
 					}
@@ -328,7 +309,9 @@ func runTest(t *testing.T, file string) {
 
 					// native_to_relaxed_extended_json(bson_to_native(cB)) = rEJ (if rEJ exists)
 					if v.RelaxedExtJSON != nil {
-						rEJ := unescapeUnicode(string(pretty.Ugly([]byte(*v.RelaxedExtJSON))), test.BsonType)
+						var compactEJ bytes.Buffer
+						require.NoError(t, json.Compact(&compactEJ, []byte(*v.RelaxedExtJSON)))
+						rEJ := unescapeUnicode(compactEJ.String(), test.BsonType)
 						if test.BsonType == "0x01" {
 							rEJ = normalizeRelaxedDouble(t, *test.TestKey, rEJ)
 						}
@@ -368,7 +351,9 @@ func runTest(t *testing.T, file string) {
 
 					/*** degenerate JSON round-trip tests (if exists) ***/
 					if v.DegenerateExtJSON != nil {
-						dEJ := unescapeUnicode(string(pretty.Ugly([]byte(*v.DegenerateExtJSON))), test.BsonType)
+						var compactEJ bytes.Buffer
+						require.NoError(t, json.Compact(&compactEJ, []byte(*v.DegenerateExtJSON)))
+						dEJ := unescapeUnicode(compactEJ.String(), test.BsonType)
 						if test.BsonType == "0x01" {
 							dEJ = normalizeCanonicalDouble(t, *test.TestKey, dEJ)
 						}
@@ -401,9 +386,9 @@ func runTest(t *testing.T, file string) {
 					// and assert that there was no error if any of the string or DBPointer values contain invalid UTF-8
 					// characters.
 					for _, elem := range doc {
-						str, ok := elem.Value.(string)
-						invalidString := ok && !utf8.ValidString(str)
-						dbPtr, ok := elem.Value.(primitive.DBPointer)
+						value := reflect.ValueOf(elem.Value)
+						invalidString := (value.Kind() == reflect.String) && !utf8.ValidString(value.String())
+						dbPtr, ok := elem.Value.(DBPointer)
 						invalidDBPtr := ok && !utf8.ValidString(dbPtr.DB)
 
 						if invalidString || invalidDBPtr {
@@ -506,11 +491,18 @@ func TestRelaxedUUIDValidation(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			// get canonical extended JSON
-			cEJ := unescapeUnicode(string(pretty.Ugly([]byte(tc.canonicalExtJSON))), "0x05")
+			// get canonical extended JSON (if provided)
+			cEJ := ""
+			if tc.canonicalExtJSON != "" {
+				var compactCEJ bytes.Buffer
+				require.NoError(t, json.Compact(&compactCEJ, []byte(tc.canonicalExtJSON)))
+				cEJ = unescapeUnicode(compactCEJ.String(), "0x05")
+			}
 
 			// get degenerate extended JSON
-			dEJ := unescapeUnicode(string(pretty.Ugly([]byte(tc.degenerateExtJSON))), "0x05")
+			var compactDEJ bytes.Buffer
+			require.NoError(t, json.Compact(&compactDEJ, []byte(tc.degenerateExtJSON)))
+			dEJ := unescapeUnicode(compactDEJ.String(), "0x05")
 
 			// convert dEJ to native doc
 			var doc D

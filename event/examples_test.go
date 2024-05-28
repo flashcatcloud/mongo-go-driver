@@ -32,16 +32,22 @@ func ExampleCommandMonitor() {
 				startedCommands[evt.RequestID],
 				evt.Reply,
 			)
+
+			// Empty "startedCommands" for the request ID to avoid a memory leak.
+			delete(startedCommands, evt.RequestID)
 		},
 		Failed: func(_ context.Context, evt *event.CommandFailedEvent) {
 			log.Printf("Command: %v Failure: %v\n",
 				startedCommands[evt.RequestID],
 				evt.Failure,
 			)
+
+			// Empty "startedCommands" for the request ID to avoid a memory leak.
+			delete(startedCommands, evt.RequestID)
 		},
 	}
 	clientOpts := options.Client().ApplyURI("mongodb://localhost:27017").SetMonitor(cmdMonitor)
-	client, err := mongo.Connect(context.Background(), clientOpts)
+	client, err := mongo.Connect(clientOpts)
 	if err != nil {
 		log.Fatal(err)
 	}

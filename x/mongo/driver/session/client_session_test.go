@@ -8,11 +8,12 @@ package session
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/internal/assert"
+	"go.mongodb.org/mongo-driver/internal/require"
 	"go.mongodb.org/mongo-driver/internal/uuid"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
@@ -23,7 +24,7 @@ var sessionOpts = &ClientOptions{
 	CausalConsistency: &consistent,
 }
 
-func compareOperationTimes(t *testing.T, expected *primitive.Timestamp, actual *primitive.Timestamp) {
+func compareOperationTimes(t *testing.T, expected *bson.Timestamp, actual *bson.Timestamp) {
 	if expected.T != actual.T {
 		t.Fatalf("T value mismatch; expected %d got %d", expected.T, actual.T)
 	}
@@ -52,7 +53,7 @@ func TestClientSession(t *testing.T) {
 
 	t.Run("TestAdvanceClusterTime", func(t *testing.T) {
 		id, _ := uuid.New()
-		sess, err := NewClientSession(&Pool{}, id, Explicit, sessionOpts)
+		sess, err := NewClientSession(&Pool{}, id, sessionOpts)
 		require.Nil(t, err, "Unexpected error")
 		err = sess.AdvanceClusterTime(clusterTime2)
 		require.Nil(t, err, "Unexpected error")
@@ -74,7 +75,7 @@ func TestClientSession(t *testing.T) {
 
 	t.Run("TestEndSession", func(t *testing.T) {
 		id, _ := uuid.New()
-		sess, err := NewClientSession(&Pool{}, id, Explicit, sessionOpts)
+		sess, err := NewClientSession(&Pool{}, id, sessionOpts)
 		require.Nil(t, err, "Unexpected error")
 		sess.EndSession()
 		err = sess.UpdateUseTime()
@@ -83,10 +84,10 @@ func TestClientSession(t *testing.T) {
 
 	t.Run("TestAdvanceOperationTime", func(t *testing.T) {
 		id, _ := uuid.New()
-		sess, err := NewClientSession(&Pool{}, id, Explicit, sessionOpts)
+		sess, err := NewClientSession(&Pool{}, id, sessionOpts)
 		require.Nil(t, err, "Unexpected error")
 
-		optime1 := &primitive.Timestamp{
+		optime1 := &bson.Timestamp{
 			T: 1,
 			I: 0,
 		}
@@ -94,7 +95,7 @@ func TestClientSession(t *testing.T) {
 		assert.Nil(t, err, "error updating first operation time: %s", err)
 		compareOperationTimes(t, optime1, sess.OperationTime)
 
-		optime2 := &primitive.Timestamp{
+		optime2 := &bson.Timestamp{
 			T: 2,
 			I: 0,
 		}
@@ -102,7 +103,7 @@ func TestClientSession(t *testing.T) {
 		assert.Nil(t, err, "error updating second operation time: %s", err)
 		compareOperationTimes(t, optime2, sess.OperationTime)
 
-		optime3 := &primitive.Timestamp{
+		optime3 := &bson.Timestamp{
 			T: 2,
 			I: 1,
 		}
@@ -110,7 +111,7 @@ func TestClientSession(t *testing.T) {
 		assert.Nil(t, err, "error updating third operation time: %s", err)
 		compareOperationTimes(t, optime3, sess.OperationTime)
 
-		err = sess.AdvanceOperationTime(&primitive.Timestamp{
+		err = sess.AdvanceOperationTime(&bson.Timestamp{
 			T: 1,
 			I: 10,
 		})
@@ -121,16 +122,16 @@ func TestClientSession(t *testing.T) {
 
 	t.Run("TestTransactionState", func(t *testing.T) {
 		id, _ := uuid.New()
-		sess, err := NewClientSession(&Pool{}, id, Explicit, nil)
+		sess, err := NewClientSession(&Pool{}, id, nil)
 		require.Nil(t, err, "Unexpected error")
 
 		err = sess.CommitTransaction()
-		if err != ErrNoTransactStarted {
+		if !errors.Is(err, ErrNoTransactStarted) {
 			t.Errorf("expected error, got %v", err)
 		}
 
 		err = sess.AbortTransaction()
-		if err != ErrNoTransactStarted {
+		if !errors.Is(err, ErrNoTransactStarted) {
 			t.Errorf("expected error, got %v", err)
 		}
 
@@ -145,7 +146,7 @@ func TestClientSession(t *testing.T) {
 		}
 
 		err = sess.StartTransaction(nil)
-		if err != ErrTransactInProgress {
+		if !errors.Is(err, ErrTransactInProgress) {
 			t.Errorf("expected error, got %v", err)
 		}
 
@@ -156,7 +157,7 @@ func TestClientSession(t *testing.T) {
 		}
 
 		err = sess.StartTransaction(nil)
-		if err != ErrTransactInProgress {
+		if !errors.Is(err, ErrTransactInProgress) {
 			t.Errorf("expected error, got %v", err)
 		}
 
@@ -167,7 +168,7 @@ func TestClientSession(t *testing.T) {
 		}
 
 		err = sess.AbortTransaction()
-		if err != ErrAbortAfterCommit {
+		if !errors.Is(err, ErrAbortAfterCommit) {
 			t.Errorf("expected error, got %v", err)
 		}
 
@@ -184,12 +185,12 @@ func TestClientSession(t *testing.T) {
 		}
 
 		err = sess.AbortTransaction()
-		if err != ErrAbortTwice {
+		if !errors.Is(err, ErrAbortTwice) {
 			t.Errorf("expected error, got %v", err)
 		}
 
 		err = sess.CommitTransaction()
-		if err != ErrCommitAfterAbort {
+		if !errors.Is(err, ErrCommitAfterAbort) {
 			t.Errorf("expected error, got %v", err)
 		}
 	})
@@ -273,7 +274,7 @@ func TestClientSession(t *testing.T) {
 				}
 
 				id, _ := uuid.New()
-				sess, err := NewClientSession(&Pool{}, id, Explicit, sessOpts)
+				sess, err := NewClientSession(&Pool{}, id, sessOpts)
 				require.Nil(t, err, "unexpected NewClientSession error %v", err)
 
 				require.Equal(t, tc.expectedConsistent, sess.Consistent,
@@ -282,5 +283,19 @@ func TestClientSession(t *testing.T) {
 					"expected Snapshot to be %v, got %v", tc.expectedSnapshot, sess.Snapshot)
 			})
 		}
+	})
+}
+
+func TestImplicitClientSession(t *testing.T) {
+	t.Parallel()
+
+	t.Run("causal consistency is false", func(t *testing.T) {
+		t.Parallel()
+
+		id, err := uuid.New()
+		require.NoError(t, err)
+
+		c := NewImplicitClientSession(&Pool{}, id)
+		assert.False(t, c.Consistent, "expected causal consistency to be false for implicit sessions")
 	})
 }

@@ -44,7 +44,7 @@ do
 			for CORPUS_FILE in $PARENTDIR/testdata/fuzz/$FUNC/*
 			do
 				# Check to see if the value for CORPUS_FILE is in cset.
-				if [[ ! " ${cset[@]} " =~ " ${CORPUS_FILE} " ]]; then
+				if [[ ! " ${cset[*]} " =~ " ${CORPUS_FILE} " ]]; then
 					# Create the directory if it doesn't exist.
 					if [ ! -d $PROJECT_DIRECTORY/fuzz/$FUNC ]; then
 						mkdir -p $PROJECT_DIRECTORY/fuzz/$FUNC
@@ -64,5 +64,8 @@ done
 if [ -d $PROJECT_DIRECTORY/fuzz ]; then
 	echo "Tarring up fuzz directory"
 	tar -czf $PROJECT_DIRECTORY/fuzz.tgz $PROJECT_DIRECTORY/fuzz
-fi
 
+	# Exit with code 1 to indicate that errors occurred in fuzz tests, resulting in corpus files being generated.
+	# This will trigger a notification to be sent to the Go Driver team.
+	exit 1
+fi

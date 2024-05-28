@@ -7,7 +7,7 @@
 package options
 
 import (
-	"go.mongodb.org/mongo-driver/bson/bsoncodec"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
@@ -27,9 +27,13 @@ type CollectionOptions struct {
 	// the read preference of the Database used to configure the Collection will be used.
 	ReadPreference *readpref.ReadPref
 
+	// BSONOptions configures optional BSON marshaling and unmarshaling
+	// behavior.
+	BSONOptions *BSONOptions
+
 	// Registry is the BSON registry to marshal and unmarshal documents for operations executed on the Collection. The default value
 	// is nil, which means that the registry of the Database used to configure the Collection will be used.
-	Registry *bsoncodec.Registry
+	Registry *bson.Registry
 }
 
 // Collection creates a new CollectionOptions instance.
@@ -55,34 +59,14 @@ func (c *CollectionOptions) SetReadPreference(rp *readpref.ReadPref) *Collection
 	return c
 }
 
-// SetRegistry sets the value for the Registry field.
-func (c *CollectionOptions) SetRegistry(r *bsoncodec.Registry) *CollectionOptions {
-	c.Registry = r
+// SetBSONOptions configures optional BSON marshaling and unmarshaling behavior.
+func (c *CollectionOptions) SetBSONOptions(opts *BSONOptions) *CollectionOptions {
+	c.BSONOptions = opts
 	return c
 }
 
-// MergeCollectionOptions combines the given CollectionOptions instances into a single *CollectionOptions in a
-// last-one-wins fashion.
-func MergeCollectionOptions(opts ...*CollectionOptions) *CollectionOptions {
-	c := Collection()
-
-	for _, opt := range opts {
-		if opt == nil {
-			continue
-		}
-		if opt.ReadConcern != nil {
-			c.ReadConcern = opt.ReadConcern
-		}
-		if opt.WriteConcern != nil {
-			c.WriteConcern = opt.WriteConcern
-		}
-		if opt.ReadPreference != nil {
-			c.ReadPreference = opt.ReadPreference
-		}
-		if opt.Registry != nil {
-			c.Registry = opt.Registry
-		}
-	}
-
+// SetRegistry sets the value for the Registry field.
+func (c *CollectionOptions) SetRegistry(r *bson.Registry) *CollectionOptions {
+	c.Registry = r
 	return c
 }

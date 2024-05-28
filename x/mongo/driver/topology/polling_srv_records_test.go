@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/internal/assert"
+	"go.mongodb.org/mongo-driver/internal/require"
 	"go.mongodb.org/mongo-driver/mongo/address"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -75,7 +75,7 @@ func (r *mockResolver) LookupSRV(service, proto, name string) (string, []*net.SR
 	return str, addresses, err
 }
 
-func (r *mockResolver) LookupTXT(name string) ([]string, error) { return nil, nil }
+func (r *mockResolver) LookupTXT(string) ([]string, error) { return nil, nil }
 
 var srvPollingTests = []struct {
 	name            string
@@ -105,6 +105,7 @@ func (ss serverSorter) Less(i, j int) bool {
 }
 
 func compareHosts(t *testing.T, received []description.Server, expected []string) {
+	t.Helper()
 	if len(received) != len(expected) {
 		t.Fatalf("Number of hosts in topology does not match expected value. Got %v; want %v.", len(received), len(expected))
 	}
@@ -125,9 +126,21 @@ func compareHosts(t *testing.T, received []description.Server, expected []string
 }
 
 func TestPollingSRVRecordsSpec(t *testing.T) {
+	for _, uri := range []string{
+		"mongodb+srv://test1.test.build.10gen.cc/?heartbeatFrequencyMS=100",
+		// Test with user:pass as a regression test for GODRIVER-2620
+		"mongodb+srv://user:pass@test1.test.build.10gen.cc/?heartbeatFrequencyMS=100",
+	} {
+		t.Run(uri, func(t *testing.T) {
+			testPollingSRVRecordsSpec(t, uri)
+		})
+	}
+}
+
+func testPollingSRVRecordsSpec(t *testing.T, uri string) {
+	t.Helper()
 	for _, tt := range srvPollingTests {
 		t.Run(tt.name, func(t *testing.T) {
-			uri := "mongodb+srv://test1.test.build.10gen.cc/?heartbeatFrequencyMS=100"
 			cfg, err := NewConfig(options.Client().ApplyURI(uri), nil)
 			require.NoError(t, err, "error constructing topology configs: %v", err)
 
@@ -296,7 +309,7 @@ func TestPollingSRVRecordsLoadBalanced(t *testing.T) {
 
 func TestPollSRVRecordsMaxHosts(t *testing.T) {
 	// simulateSRVPoll creates a topology with srvMaxHosts, mocks the DNS changes described by
-	// recordsToAdd and recordsToRemove, and returns the the topology.
+	// recordsToAdd and recordsToRemove, and returns the topology.
 	simulateSRVPoll := func(srvMaxHosts int, recordsToAdd []*net.SRV, recordsToRemove []*net.SRV) (*Topology, func(ctx context.Context) error) {
 		t.Helper()
 

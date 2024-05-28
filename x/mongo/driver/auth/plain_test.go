@@ -13,10 +13,12 @@ import (
 
 	"encoding/base64"
 
+	"go.mongodb.org/mongo-driver/internal/require"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 	. "go.mongodb.org/mongo-driver/x/mongo/driver/auth"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/drivertest"
+	"go.mongodb.org/mongo-driver/x/mongo/driver/mnet"
 )
 
 func TestPlainAuthenticator_Fails(t *testing.T) {
@@ -47,7 +49,9 @@ func TestPlainAuthenticator_Fails(t *testing.T) {
 		Desc:     desc,
 	}
 
-	err := authenticator.Auth(context.Background(), &Config{Description: desc, Connection: c})
+	mnetconn := mnet.NewConnection(c)
+
+	err := authenticator.Auth(context.Background(), &Config{Connection: mnetconn})
 	if err == nil {
 		t.Fatalf("expected an error but got none")
 	}
@@ -90,7 +94,9 @@ func TestPlainAuthenticator_Extra_server_message(t *testing.T) {
 		Desc:     desc,
 	}
 
-	err := authenticator.Auth(context.Background(), &Config{Description: desc, Connection: c})
+	mnetconn := mnet.NewConnection(c)
+
+	err := authenticator.Auth(context.Background(), &Config{Connection: mnetconn})
 	if err == nil {
 		t.Fatalf("expected an error but got none")
 	}
@@ -128,7 +134,9 @@ func TestPlainAuthenticator_Succeeds(t *testing.T) {
 		Desc:     desc,
 	}
 
-	err := authenticator.Auth(context.Background(), &Config{Description: desc, Connection: c})
+	mnetconn := mnet.NewConnection(c)
+
+	err := authenticator.Auth(context.Background(), &Config{Connection: mnetconn})
 	if err != nil {
 		t.Fatalf("expected no error but got \"%s\"", err)
 	}
@@ -138,6 +146,50 @@ func TestPlainAuthenticator_Succeeds(t *testing.T) {
 	}
 
 	payload, _ := base64.StdEncoding.DecodeString("AHVzZXIAcGVuY2ls")
+	expectedCmd := bsoncore.BuildDocumentFromElements(nil,
+		bsoncore.AppendInt32Element(nil, "saslStart", 1),
+		bsoncore.AppendStringElement(nil, "mechanism", "PLAIN"),
+		bsoncore.AppendBinaryElement(nil, "payload", 0x00, payload),
+	)
+	compareResponses(t, <-c.Written, expectedCmd, "$external")
+}
+
+func TestPlainAuthenticator_SucceedsBoolean(t *testing.T) {
+	t.Parallel()
+
+	authenticator := PlainAuthenticator{
+		Username: "user",
+		Password: "pencil",
+	}
+
+	resps := make(chan []byte, 1)
+	writeReplies(resps, bsoncore.BuildDocumentFromElements(nil,
+		bsoncore.AppendBooleanElement(nil, "ok", true),
+		bsoncore.AppendInt32Element(nil, "conversationId", 1),
+		bsoncore.AppendBinaryElement(nil, "payload", 0x00, []byte{}),
+		bsoncore.AppendBooleanElement(nil, "done", true),
+	))
+
+	desc := description.Server{
+		WireVersion: &description.VersionRange{
+			Max: 6,
+		},
+	}
+	c := &drivertest.ChannelConn{
+		Written:  make(chan []byte, 1),
+		ReadResp: resps,
+		Desc:     desc,
+	}
+
+	mnetconn := mnet.NewConnection(c)
+
+	err := authenticator.Auth(context.Background(), &Config{Connection: mnetconn})
+	require.NoError(t, err, "Auth error")
+	require.Len(t, c.Written, 1, "expected 1 messages to be sent")
+
+	payload, err := base64.StdEncoding.DecodeString("AHVzZXIAcGVuY2ls")
+	require.NoError(t, err, "DecodeString error")
+
 	expectedCmd := bsoncore.BuildDocumentFromElements(nil,
 		bsoncore.AppendInt32Element(nil, "saslStart", 1),
 		bsoncore.AppendStringElement(nil, "mechanism", "PLAIN"),

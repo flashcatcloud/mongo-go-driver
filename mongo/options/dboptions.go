@@ -7,7 +7,7 @@
 package options
 
 import (
-	"go.mongodb.org/mongo-driver/bson/bsoncodec"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
@@ -27,9 +27,13 @@ type DatabaseOptions struct {
 	// the read preference of the Client used to configure the Database will be used.
 	ReadPreference *readpref.ReadPref
 
+	// BSONOptions configures optional BSON marshaling and unmarshaling
+	// behavior.
+	BSONOptions *BSONOptions
+
 	// Registry is the BSON registry to marshal and unmarshal documents for operations executed on the Database. The default value
 	// is nil, which means that the registry of the Client used to configure the Database will be used.
-	Registry *bsoncodec.Registry
+	Registry *bson.Registry
 }
 
 // Database creates a new DatabaseOptions instance.
@@ -55,34 +59,14 @@ func (d *DatabaseOptions) SetReadPreference(rp *readpref.ReadPref) *DatabaseOpti
 	return d
 }
 
-// SetRegistry sets the value for the Registry field.
-func (d *DatabaseOptions) SetRegistry(r *bsoncodec.Registry) *DatabaseOptions {
-	d.Registry = r
+// SetBSONOptions configures optional BSON marshaling and unmarshaling behavior.
+func (d *DatabaseOptions) SetBSONOptions(opts *BSONOptions) *DatabaseOptions {
+	d.BSONOptions = opts
 	return d
 }
 
-// MergeDatabaseOptions combines the given DatabaseOptions instances into a single DatabaseOptions in a last-one-wins
-// fashion.
-func MergeDatabaseOptions(opts ...*DatabaseOptions) *DatabaseOptions {
-	d := Database()
-
-	for _, opt := range opts {
-		if opt == nil {
-			continue
-		}
-		if opt.ReadConcern != nil {
-			d.ReadConcern = opt.ReadConcern
-		}
-		if opt.WriteConcern != nil {
-			d.WriteConcern = opt.WriteConcern
-		}
-		if opt.ReadPreference != nil {
-			d.ReadPreference = opt.ReadPreference
-		}
-		if opt.Registry != nil {
-			d.Registry = opt.Registry
-		}
-	}
-
+// SetRegistry sets the value for the Registry field.
+func (d *DatabaseOptions) SetRegistry(r *bson.Registry) *DatabaseOptions {
+	d.Registry = r
 	return d
 }

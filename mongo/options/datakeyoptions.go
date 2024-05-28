@@ -77,25 +77,3 @@ func (dk *DataKeyOptions) SetKeyMaterial(keyMaterial []byte) *DataKeyOptions {
 	dk.KeyMaterial = keyMaterial
 	return dk
 }
-
-// MergeDataKeyOptions combines the argued DataKeyOptions in a last-one wins fashion.
-func MergeDataKeyOptions(opts ...*DataKeyOptions) *DataKeyOptions {
-	dko := DataKey()
-	for _, opt := range opts {
-		if opt == nil {
-			continue
-		}
-
-		if opt.MasterKey != nil {
-			dko.MasterKey = opt.MasterKey
-		}
-		if opt.KeyAltNames != nil {
-			dko.KeyAltNames = opt.KeyAltNames
-		}
-		if opt.KeyMaterial != nil {
-			dko.KeyMaterial = opt.KeyMaterial
-		}
-	}
-
-	return dko
-}

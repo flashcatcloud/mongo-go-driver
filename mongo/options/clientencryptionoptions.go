@@ -9,6 +9,9 @@ package options
 import (
 	"crypto/tls"
 	"fmt"
+	"net/http"
+
+	"go.mongodb.org/mongo-driver/internal/httputil"
 )
 
 // ClientEncryptionOptions represents all possible options used to configure a ClientEncryption instance.
@@ -16,11 +19,14 @@ type ClientEncryptionOptions struct {
 	KeyVaultNamespace string
 	KmsProviders      map[string]map[string]interface{}
 	TLSConfig         map[string]*tls.Config
+	HTTPClient        *http.Client
 }
 
 // ClientEncryption creates a new ClientEncryptionOptions instance.
 func ClientEncryption() *ClientEncryptionOptions {
-	return &ClientEncryptionOptions{}
+	return &ClientEncryptionOptions{
+		HTTPClient: httputil.DefaultHTTPClient,
+	}
 }
 
 // SetKeyVaultNamespace specifies the namespace of the key vault collection. This is required.
@@ -113,26 +119,4 @@ func BuildTLSConfig(tlsOpts map[string]interface{}) (*tls.Config, error) {
 	}
 
 	return cfg, nil
-}
-
-// MergeClientEncryptionOptions combines the argued ClientEncryptionOptions in a last-one wins fashion.
-func MergeClientEncryptionOptions(opts ...*ClientEncryptionOptions) *ClientEncryptionOptions {
-	ceo := ClientEncryption()
-	for _, opt := range opts {
-		if opt == nil {
-			continue
-		}
-
-		if opt.KeyVaultNamespace != "" {
-			ceo.KeyVaultNamespace = opt.KeyVaultNamespace
-		}
-		if opt.KmsProviders != nil {
-			ceo.KmsProviders = opt.KmsProviders
-		}
-		if opt.TLSConfig != nil {
-			ceo.TLSConfig = opt.TLSConfig
-		}
-	}
-
-	return ceo
 }

@@ -54,25 +54,3 @@ func (do *DistinctOptions) SetMaxTime(d time.Duration) *DistinctOptions {
 	do.MaxTime = &d
 	return do
 }
-
-// MergeDistinctOptions combines the given DistinctOptions instances into a single DistinctOptions in a last-one-wins
-// fashion.
-func MergeDistinctOptions(opts ...*DistinctOptions) *DistinctOptions {
-	distinctOpts := Distinct()
-	for _, do := range opts {
-		if do == nil {
-			continue
-		}
-		if do.Collation != nil {
-			distinctOpts.Collation = do.Collation
-		}
-		if do.Comment != nil {
-			distinctOpts.Comment = do.Comment
-		}
-		if do.MaxTime != nil {
-			distinctOpts.MaxTime = do.MaxTime
-		}
-	}
-
-	return distinctOpts
-}

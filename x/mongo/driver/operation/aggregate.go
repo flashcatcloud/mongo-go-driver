@@ -11,8 +11,8 @@ import (
 	"errors"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson/bsontype"
 	"go.mongodb.org/mongo-driver/event"
+	"go.mongodb.org/mongo-driver/internal/driverutil"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
@@ -28,7 +28,7 @@ type Aggregate struct {
 	batchSize                *int32
 	bypassDocumentValidation *bool
 	collation                bsoncore.Document
-	comment                  *string
+	comment                  bsoncore.Value
 	hint                     bsoncore.Value
 	maxTime                  *time.Duration
 	pipeline                 bsoncore.Document
@@ -111,14 +111,15 @@ func (a *Aggregate) Execute(ctx context.Context) error {
 		IsOutputAggregate:              a.hasOutputStage,
 		MaxTime:                        a.maxTime,
 		Timeout:                        a.timeout,
+		Name:                           driverutil.AggregateOp,
 	}.Execute(ctx)
 
 }
 
 func (a *Aggregate) command(dst []byte, desc description.SelectedServer) ([]byte, error) {
-	header := bsoncore.Value{Type: bsontype.String, Data: bsoncore.AppendString(nil, a.collection)}
+	header := bsoncore.Value{Type: bsoncore.TypeString, Data: bsoncore.AppendString(nil, a.collection)}
 	if a.collection == "" {
-		header = bsoncore.Value{Type: bsontype.Int32, Data: []byte{0x01, 0x00, 0x00, 0x00}}
+		header = bsoncore.Value{Type: bsoncore.TypeInt32, Data: []byte{0x01, 0x00, 0x00, 0x00}}
 	}
 	dst = bsoncore.AppendValueElement(dst, "aggregate", header)
 
@@ -141,11 +142,10 @@ func (a *Aggregate) command(dst []byte, desc description.SelectedServer) ([]byte
 		}
 		dst = bsoncore.AppendDocumentElement(dst, "collation", a.collation)
 	}
-	if a.comment != nil {
-
-		dst = bsoncore.AppendStringElement(dst, "comment", *a.comment)
+	if a.comment.Type != bsoncore.Type(0) {
+		dst = bsoncore.AppendValueElement(dst, "comment", a.comment)
 	}
-	if a.hint.Type != bsontype.Type(0) {
+	if a.hint.Type != bsoncore.Type(0) {
 
 		dst = bsoncore.AppendValueElement(dst, "hint", a.hint)
 	}
@@ -205,13 +205,13 @@ func (a *Aggregate) Collation(collation bsoncore.Document) *Aggregate {
 	return a
 }
 
-// Comment specifies an arbitrary string to help trace the operation through the database profiler, currentOp, and logs.
-func (a *Aggregate) Comment(comment string) *Aggregate {
+// Comment sets a value to help trace an operation.
+func (a *Aggregate) Comment(comment bsoncore.Value) *Aggregate {
 	if a == nil {
 		a = new(Aggregate)
 	}
 
-	a.comment = &comment
+	a.comment = comment
 	return a
 }
 

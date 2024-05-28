@@ -8,13 +8,13 @@ package mongo_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
@@ -226,7 +226,7 @@ func ExampleCollection_Aggregate() {
 
 func ExampleCollection_BulkWrite() {
 	var coll *mongo.Collection
-	var firstID, secondID primitive.ObjectID
+	var firstID, secondID bson.ObjectID
 
 	// Update the "email" field for two users.
 	// For each update, specify the Upsert option to insert a new document if a
@@ -323,7 +323,12 @@ func ExampleCollection_Distinct() {
 	// run on the server.
 	filter := bson.D{{"age", bson.D{{"$gt", 25}}}}
 	opts := options.Distinct().SetMaxTime(2 * time.Second)
-	values, err := coll.Distinct(context.TODO(), "name", filter, opts)
+	res := coll.Distinct(context.TODO(), "name", filter, opts)
+	if err := res.Err(); err != nil {
+		log.Fatal(err)
+	}
+
+	values, err := res.Raw()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -372,7 +377,7 @@ func ExampleCollection_Find() {
 
 func ExampleCollection_FindOne() {
 	var coll *mongo.Collection
-	var id primitive.ObjectID
+	var id bson.ObjectID
 
 	// Find the document for which the _id field matches id.
 	// Specify the Sort option to sort the documents by age.
@@ -387,7 +392,7 @@ func ExampleCollection_FindOne() {
 	if err != nil {
 		// ErrNoDocuments means that the filter did not match any documents in
 		// the collection.
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return
 		}
 		log.Fatal(err)
@@ -397,7 +402,7 @@ func ExampleCollection_FindOne() {
 
 func ExampleCollection_FindOneAndDelete() {
 	var coll *mongo.Collection
-	var id primitive.ObjectID
+	var id bson.ObjectID
 
 	// Find and delete the document for which the _id field matches id.
 	// Specify the Projection option to only include the name and age fields in
@@ -413,7 +418,7 @@ func ExampleCollection_FindOneAndDelete() {
 	if err != nil {
 		// ErrNoDocuments means that the filter did not match any documents in
 		// the collection.
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return
 		}
 		log.Fatal(err)
@@ -423,7 +428,7 @@ func ExampleCollection_FindOneAndDelete() {
 
 func ExampleCollection_FindOneAndReplace() {
 	var coll *mongo.Collection
-	var id primitive.ObjectID
+	var id bson.ObjectID
 
 	// Find the document for which the _id field matches id and add a field
 	// called "location".
@@ -442,7 +447,7 @@ func ExampleCollection_FindOneAndReplace() {
 	if err != nil {
 		// ErrNoDocuments means that the filter did not match any documents in
 		// the collection.
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return
 		}
 		log.Fatal(err)
@@ -452,7 +457,7 @@ func ExampleCollection_FindOneAndReplace() {
 
 func ExampleCollection_FindOneAndUpdate() {
 	var coll *mongo.Collection
-	var id primitive.ObjectID
+	var id bson.ObjectID
 
 	// Find the document for which the _id field matches id and set the email to
 	// "newemail@example.com".
@@ -471,7 +476,7 @@ func ExampleCollection_FindOneAndUpdate() {
 	if err != nil {
 		// ErrNoDocuments means that the filter did not match any documents in
 		// the collection.
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return
 		}
 		log.Fatal(err)
@@ -510,7 +515,7 @@ func ExampleCollection_InsertOne() {
 
 func ExampleCollection_ReplaceOne() {
 	var coll *mongo.Collection
-	var id primitive.ObjectID
+	var id bson.ObjectID
 
 	// Find the document for which the _id field matches id and add a field
 	// called "location".
@@ -554,7 +559,7 @@ func ExampleCollection_UpdateMany() {
 
 func ExampleCollection_UpdateOne() {
 	var coll *mongo.Collection
-	var id primitive.ObjectID
+	var id bson.ObjectID
 
 	// Find the document for which the _id field matches id and set the email to
 	// "newemail@example.com".
@@ -625,16 +630,17 @@ func ExampleWithSession() {
 	err = mongo.WithSession(
 		context.TODO(),
 		sess,
-		func(sessCtx mongo.SessionContext) error {
-			// Use sessCtx as the Context parameter for InsertOne and FindOne so
-			// both operations are run under the new Session.
+		func(ctx context.Context) error {
+			// Use the context.Context as the Context parameter for
+			// InsertOne and FindOne so both operations are run under the new
+			// Session.
 
 			if err := sess.StartTransaction(); err != nil {
 				return err
 			}
 
 			coll := client.Database("db").Collection("coll")
-			res, err := coll.InsertOne(sessCtx, bson.D{{"x", 1}})
+			res, err := coll.InsertOne(ctx, bson.D{{"x", 1}})
 			if err != nil {
 				// Abort the transaction after an error. Use
 				// context.Background() to ensure that the abort can complete
@@ -646,7 +652,7 @@ func ExampleWithSession() {
 
 			var result bson.M
 			err = coll.FindOne(
-				sessCtx,
+				ctx,
 				bson.D{{"_id", res.InsertedID}},
 			).Decode(result)
 			if err != nil {
@@ -681,28 +687,30 @@ func ExampleClient_UseSessionWithOptions() {
 	err := client.UseSessionWithOptions(
 		context.TODO(),
 		opts,
-		func(sessCtx mongo.SessionContext) error {
-			// Use sessCtx as the Context parameter for InsertOne and FindOne so
-			// both operations are run under the new Session.
+		func(ctx context.Context) error {
+			sess := mongo.SessionFromContext(ctx)
+			// Use the context.Context as the Context parameter for
+			// InsertOne and FindOne so both operations are run under the new
+			// Session.
 
-			if err := sessCtx.StartTransaction(); err != nil {
+			if err := sess.StartTransaction(); err != nil {
 				return err
 			}
 
 			coll := client.Database("db").Collection("coll")
-			res, err := coll.InsertOne(sessCtx, bson.D{{"x", 1}})
+			res, err := coll.InsertOne(ctx, bson.D{{"x", 1}})
 			if err != nil {
 				// Abort the transaction after an error. Use
 				// context.Background() to ensure that the abort can complete
 				// successfully even if the context passed to mongo.WithSession
 				// is changed to have a timeout.
-				_ = sessCtx.AbortTransaction(context.Background())
+				_ = sess.AbortTransaction(context.Background())
 				return err
 			}
 
 			var result bson.M
 			err = coll.FindOne(
-				sessCtx,
+				ctx,
 				bson.D{{"_id", res.InsertedID}},
 			).Decode(result)
 			if err != nil {
@@ -710,7 +718,7 @@ func ExampleClient_UseSessionWithOptions() {
 				// context.Background() to ensure that the abort can complete
 				// successfully even if the context passed to mongo.WithSession
 				// is changed to have a timeout.
-				_ = sessCtx.AbortTransaction(context.Background())
+				_ = sess.AbortTransaction(context.Background())
 				return err
 			}
 			fmt.Println(result)
@@ -718,7 +726,7 @@ func ExampleClient_UseSessionWithOptions() {
 			// Use context.Background() to ensure that the commit can complete
 			// successfully even if the context passed to mongo.WithSession is
 			// changed to have a timeout.
-			return sessCtx.CommitTransaction(context.Background())
+			return sess.CommitTransaction(context.Background())
 		})
 	if err != nil {
 		log.Fatal(err)
@@ -748,19 +756,20 @@ func ExampleClient_StartSession_withTransaction() {
 		SetReadPreference(readpref.PrimaryPreferred())
 	result, err := sess.WithTransaction(
 		context.TODO(),
-		func(sessCtx mongo.SessionContext) (interface{}, error) {
-			// Use sessCtx as the Context parameter for InsertOne and FindOne so
-			// both operations are run in a transaction.
+		func(ctx context.Context) (interface{}, error) {
+			// Use the context.Context as the Context parameter for
+			// InsertOne and FindOne so both operations are run in the same
+			// transaction.
 
 			coll := client.Database("db").Collection("coll")
-			res, err := coll.InsertOne(sessCtx, bson.D{{"x", 1}})
+			res, err := coll.InsertOne(ctx, bson.D{{"x", 1}})
 			if err != nil {
 				return nil, err
 			}
 
 			var result bson.M
 			err = coll.FindOne(
-				sessCtx,
+				ctx,
 				bson.D{{"_id", res.InsertedID}},
 			).Decode(result)
 			if err != nil {
@@ -784,16 +793,17 @@ func ExampleNewSessionContext() {
 		panic(err)
 	}
 	defer sess.EndSession(context.TODO())
-	sessCtx := mongo.NewSessionContext(context.TODO(), sess)
+	ctx := mongo.NewSessionContext(context.TODO(), sess)
 
-	// Start a transaction and sessCtx as the Context parameter to InsertOne and
-	// FindOne so both operations will be run in the transaction.
+	// Start a transaction and use the context.Context as the Context
+	// parameter for InsertOne and FindOne so both operations are run in the
+	// transaction.
 	if err = sess.StartTransaction(); err != nil {
 		panic(err)
 	}
 
 	coll := client.Database("db").Collection("coll")
-	res, err := coll.InsertOne(sessCtx, bson.D{{"x", 1}})
+	res, err := coll.InsertOne(ctx, bson.D{{"x", 1}})
 	if err != nil {
 		// Abort the transaction after an error. Use context.Background() to
 		// ensure that the abort can complete successfully even if the context
@@ -804,7 +814,7 @@ func ExampleNewSessionContext() {
 
 	var result bson.M
 	err = coll.FindOne(
-		sessCtx,
+		ctx,
 		bson.D{{"_id", res.InsertedID}},
 	).Decode(&result)
 	if err != nil {
@@ -1069,4 +1079,86 @@ func ExampleIndexView_List() {
 		log.Fatal(err)
 	}
 	fmt.Println(results)
+}
+
+func ExampleCollection_Find_primitiveRegex() {
+	ctx := context.TODO()
+	clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
+
+	// Connect to a mongodb server.
+	client, err := mongo.Connect(clientOptions)
+	if err != nil {
+		panic(err)
+	}
+
+	defer func() { _ = client.Disconnect(ctx) }()
+
+	type Pet struct {
+		Type string `bson:"type"`
+		Name string `bson:"name"`
+	}
+
+	// Create a slice of documents to insert. We will lookup a subset of
+	// these documents using regex.
+	toInsert := []interface{}{
+		Pet{Type: "cat", Name: "Mo"},
+		Pet{Type: "dog", Name: "Loki"},
+	}
+
+	coll := client.Database("test").Collection("test")
+
+	if _, err := coll.InsertMany(ctx, toInsert); err != nil {
+		panic(err)
+	}
+
+	// Create a filter to find a document with key "name" and any value that
+	// starts with letter "m". Use the "i" option to indicate
+	// case-insensitivity.
+	filter := bson.D{{"name", bson.Regex{Pattern: "^m", Options: "i"}}}
+
+	_, err = coll.Find(ctx, filter)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func ExampleCollection_Find_regex() {
+	ctx := context.TODO()
+	clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
+
+	// Connect to a mongodb server.
+	client, err := mongo.Connect(clientOptions)
+	if err != nil {
+		panic(err)
+	}
+
+	defer func() { _ = client.Disconnect(ctx) }()
+
+	type Pet struct {
+		Type string `bson:"type"`
+		Name string `bson:"name"`
+	}
+
+	// Create a slice of documents to insert. We will lookup a subset of
+	// these documents using regex.
+	toInsert := []interface{}{
+		Pet{Type: "cat", Name: "Mo"},
+		Pet{Type: "dog", Name: "Loki"},
+	}
+
+	coll := client.Database("test").Collection("test")
+
+	if _, err := coll.InsertMany(ctx, toInsert); err != nil {
+		panic(err)
+	}
+
+	// Create a filter to find a document with key "name" and any value that
+	// starts with letter "m". Use the "i" option to indicate
+	// case-insensitivity.
+	filter := bson.D{{"name", bson.D{{"$regex", "^m"}, {"$options", "i"}}}}
+
+	_, err = coll.Find(ctx, filter)
+	if err != nil {
+		panic(err)
+	}
 }

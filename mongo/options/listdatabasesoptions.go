@@ -34,22 +34,3 @@ func (ld *ListDatabasesOptions) SetAuthorizedDatabases(b bool) *ListDatabasesOpt
 	ld.AuthorizedDatabases = &b
 	return ld
 }
-
-// MergeListDatabasesOptions combines the given ListDatabasesOptions instances into a single *ListDatabasesOptions in a
-// last-one-wins fashion.
-func MergeListDatabasesOptions(opts ...*ListDatabasesOptions) *ListDatabasesOptions {
-	ld := ListDatabases()
-	for _, opt := range opts {
-		if opt == nil {
-			continue
-		}
-		if opt.NameOnly != nil {
-			ld.NameOnly = opt.NameOnly
-		}
-		if opt.AuthorizedDatabases != nil {
-			ld.AuthorizedDatabases = opt.AuthorizedDatabases
-		}
-	}
-
-	return ld
-}

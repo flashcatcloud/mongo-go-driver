@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 // ChangeStreamOptions represents options that can be used to configure a Watch operation.
@@ -23,9 +22,10 @@ type ChangeStreamOptions struct {
 	// default value is nil, which means the default collation of the collection will be used.
 	Collation *Collation
 
-	// A string that will be included in server logs, profiling logs, and currentOp queries to help trace the operation.
-	// The default is nil, which means that no comment will be included in the logs.
-	Comment *string
+	// A string or document that will be included in server logs, profiling logs,
+	// and currentOp queries to help trace the operation. The default is nil,
+	// which means that no comment will be included in the logs.
+	Comment interface{}
 
 	// Specifies how the updated document should be returned in change notifications for update operations. The default
 	// is options.Default, which means that only partial update deltas will be included in the change notification.
@@ -51,7 +51,7 @@ type ChangeStreamOptions struct {
 	// If specified, the change stream will only return changes that occurred at or after the given timestamp. This
 	// option is only valid for MongoDB versions >= 4.0. If this is specified, ResumeAfter and StartAfter must not be
 	// set.
-	StartAtOperationTime *primitive.Timestamp
+	StartAtOperationTime *bson.Timestamp
 
 	// A document specifying the logical starting point for the change stream. This is similar to the ResumeAfter
 	// option, but allows a resume token from an "invalidate" notification to be used. This allows a change stream on a
@@ -74,7 +74,6 @@ type ChangeStreamOptions struct {
 // ChangeStream creates a new ChangeStreamOptions instance.
 func ChangeStream() *ChangeStreamOptions {
 	cso := &ChangeStreamOptions{}
-	cso.SetFullDocument(Default)
 	return cso
 }
 
@@ -91,8 +90,8 @@ func (cso *ChangeStreamOptions) SetCollation(c Collation) *ChangeStreamOptions {
 }
 
 // SetComment sets the value for the Comment field.
-func (cso *ChangeStreamOptions) SetComment(comment string) *ChangeStreamOptions {
-	cso.Comment = &comment
+func (cso *ChangeStreamOptions) SetComment(comment interface{}) *ChangeStreamOptions {
+	cso.Comment = comment
 	return cso
 }
 
@@ -127,7 +126,7 @@ func (cso *ChangeStreamOptions) SetShowExpandedEvents(see bool) *ChangeStreamOpt
 }
 
 // SetStartAtOperationTime sets the value for the StartAtOperationTime field.
-func (cso *ChangeStreamOptions) SetStartAtOperationTime(t *primitive.Timestamp) *ChangeStreamOptions {
+func (cso *ChangeStreamOptions) SetStartAtOperationTime(t *bson.Timestamp) *ChangeStreamOptions {
 	cso.StartAtOperationTime = t
 	return cso
 }
@@ -153,53 +152,4 @@ func (cso *ChangeStreamOptions) SetCustom(c bson.M) *ChangeStreamOptions {
 func (cso *ChangeStreamOptions) SetCustomPipeline(cp bson.M) *ChangeStreamOptions {
 	cso.CustomPipeline = cp
 	return cso
-}
-
-// MergeChangeStreamOptions combines the given ChangeStreamOptions instances into a single ChangeStreamOptions in a
-// last-one-wins fashion.
-func MergeChangeStreamOptions(opts ...*ChangeStreamOptions) *ChangeStreamOptions {
-	csOpts := ChangeStream()
-	for _, cso := range opts {
-		if cso == nil {
-			continue
-		}
-		if cso.BatchSize != nil {
-			csOpts.BatchSize = cso.BatchSize
-		}
-		if cso.Collation != nil {
-			csOpts.Collation = cso.Collation
-		}
-		if cso.Comment != nil {
-			csOpts.Comment = cso.Comment
-		}
-		if cso.FullDocument != nil {
-			csOpts.FullDocument = cso.FullDocument
-		}
-		if cso.FullDocumentBeforeChange != nil {
-			csOpts.FullDocumentBeforeChange = cso.FullDocumentBeforeChange
-		}
-		if cso.MaxAwaitTime != nil {
-			csOpts.MaxAwaitTime = cso.MaxAwaitTime
-		}
-		if cso.ResumeAfter != nil {
-			csOpts.ResumeAfter = cso.ResumeAfter
-		}
-		if cso.ShowExpandedEvents != nil {
-			csOpts.ShowExpandedEvents = cso.ShowExpandedEvents
-		}
-		if cso.StartAtOperationTime != nil {
-			csOpts.StartAtOperationTime = cso.StartAtOperationTime
-		}
-		if cso.StartAfter != nil {
-			csOpts.StartAfter = cso.StartAfter
-		}
-		if cso.Custom != nil {
-			csOpts.Custom = cso.Custom
-		}
-		if cso.CustomPipeline != nil {
-			csOpts.CustomPipeline = cso.CustomPipeline
-		}
-	}
-
-	return csOpts
 }

@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
+	"go.mongodb.org/mongo-driver/internal/require"
+	"go.mongodb.org/mongo-driver/internal/spectest"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/connstring"
 )
 
@@ -170,19 +170,19 @@ func runTest(t *testing.T, filename string, test testCase, warningsError bool) {
 
 // Test case for all connection string spec tests.
 func TestConnStringSpec(t *testing.T) {
-	for _, file := range helpers.FindJSONFilesInDir(t, connstringTestsDir) {
+	for _, file := range spectest.FindJSONFilesInDir(t, connstringTestsDir) {
 		runTestsInFile(t, connstringTestsDir, file, false)
 	}
 }
 
 func TestURIOptionsSpec(t *testing.T) {
-	for _, file := range helpers.FindJSONFilesInDir(t, urioptionsTestDir) {
+	for _, file := range spectest.FindJSONFilesInDir(t, urioptionsTestDir) {
 		runTestsInFile(t, urioptionsTestDir, file, true)
 	}
 }
 
 // verifyConnStringOptions verifies the options on the connection string.
-func verifyConnStringOptions(t *testing.T, cs connstring.ConnString, options map[string]interface{}) {
+func verifyConnStringOptions(t *testing.T, cs *connstring.ConnString, options map[string]interface{}) {
 	// Check that all options are present.
 	for key, value := range options {
 
@@ -286,6 +286,8 @@ func verifyConnStringOptions(t *testing.T, cs connstring.ConnString, options map
 			require.Equal(t, value, float64(cs.ZstdLevel))
 		case "tlsdisableocspendpointcheck":
 			require.Equal(t, value, cs.SSLDisableOCSPEndpointCheck)
+		case "servermonitoringmode":
+			require.Equal(t, value, cs.ServerMonitoringMode)
 		default:
 			opt, ok := cs.UnknownOptions[key]
 			require.True(t, ok)

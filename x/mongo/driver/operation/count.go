@@ -12,8 +12,8 @@ import (
 	"fmt"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson/bsontype"
 	"go.mongodb.org/mongo-driver/event"
+	"go.mongodb.org/mongo-driver/internal/driverutil"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
@@ -126,6 +126,7 @@ func (c *Count) Execute(ctx context.Context) error {
 		Selector:          c.selector,
 		ServerAPI:         c.serverAPI,
 		Timeout:           c.timeout,
+		Name:              driverutil.CountOp,
 	}.Execute(ctx)
 
 	// Swallow error if NamespaceNotFound(26) is returned from aggregate on non-existent namespace
@@ -138,12 +139,12 @@ func (c *Count) Execute(ctx context.Context) error {
 	return err
 }
 
-func (c *Count) command(dst []byte, desc description.SelectedServer) ([]byte, error) {
+func (c *Count) command(dst []byte, _ description.SelectedServer) ([]byte, error) {
 	dst = bsoncore.AppendStringElement(dst, "count", c.collection)
 	if c.query != nil {
 		dst = bsoncore.AppendDocumentElement(dst, "query", c.query)
 	}
-	if c.comment.Type != bsontype.Type(0) {
+	if c.comment.Type != bsoncore.Type(0) {
 		dst = bsoncore.AppendValueElement(dst, "comment", c.comment)
 	}
 	return dst, nil

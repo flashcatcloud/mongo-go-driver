@@ -4,22 +4,20 @@
 // not use this file except in compliance with the License. You may obtain
 // a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 
-package session // import "go.mongodb.org/mongo-driver/x/mongo/driver/session"
+package session
 
 import (
-	"context"
 	"errors"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/internal/uuid"
-	"go.mongodb.org/mongo-driver/mongo/address"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
+	"go.mongodb.org/mongo-driver/x/mongo/driver/mnet"
 )
 
 // ErrSessionEnded is returned when a client session is used after a call to endSession().
@@ -45,15 +43,6 @@ var ErrUnackWCUnsupported = errors.New("transactions do not support unacknowledg
 
 // ErrSnapshotTransaction is returned if an transaction is started on a snapshot session.
 var ErrSnapshotTransaction = errors.New("transactions are not supported in snapshot sessions")
-
-// Type describes the type of the session
-type Type uint8
-
-// These constants are the valid types for a client session.
-const (
-	Explicit Type = iota
-	Implicit
-)
 
 // TransactionState indicates the state of the transactions FSM.
 type TransactionState uint8
@@ -85,25 +74,15 @@ func (s TransactionState) String() string {
 	}
 }
 
+var _ mnet.Pinner = (LoadBalancedTransactionConnection)(nil)
+
 // LoadBalancedTransactionConnection represents a connection that's pinned by a ClientSession because it's being used
 // to execute a transaction when running against a load balancer. This interface is a copy of driver.PinnedConnection
 // and exists to be able to pin transactions to a connection without causing an import cycle.
 type LoadBalancedTransactionConnection interface {
-	// Functions copied over from driver.Connection.
-	WriteWireMessage(context.Context, []byte) error
-	ReadWireMessage(ctx context.Context, dst []byte) ([]byte, error)
-	Description() description.Server
-	Close() error
-	ID() string
-	ServerConnectionID() *int32
-	Address() address.Address
-	Stale() bool
-
-	// Functions copied over from driver.PinnedConnection that are not part of Connection or Expirable.
-	PinToCursor() error
-	PinToTransaction() error
-	UnpinFromCursor() error
-	UnpinFromTransaction() error
+	mnet.ReadWriteCloser
+	mnet.Describer
+	mnet.Pinner
 }
 
 // Client is a session for clients to run commands.
@@ -112,8 +91,8 @@ type Client struct {
 	ClientID       uuid.UUID
 	ClusterTime    bson.Raw
 	Consistent     bool // causal consistency
-	OperationTime  *primitive.Timestamp
-	SessionType    Type
+	OperationTime  *bson.Timestamp
+	IsImplicit     bool
 	Terminated     bool
 	RetryingCommit bool
 	Committing     bool
@@ -140,7 +119,7 @@ type Client struct {
 	PinnedServer     *description.Server
 	RecoveryToken    bson.Raw
 	PinnedConnection LoadBalancedTransactionConnection
-	SnapshotTime     *primitive.Timestamp
+	SnapshotTime     *bson.Timestamp
 }
 
 func getClusterTime(clusterTime bson.Raw) (uint32, uint32) {
@@ -179,15 +158,27 @@ func MaxClusterTime(ct1, ct2 bson.Raw) bson.Raw {
 	return ct1
 }
 
-// NewClientSession creates a Client.
-func NewClientSession(pool *Pool, clientID uuid.UUID, sessionType Type, opts ...*ClientOptions) (*Client, error) {
-	mergedOpts := mergeClientOptions(opts...)
+// NewImplicitClientSession creates a new implicit client-side session.
+func NewImplicitClientSession(pool *Pool, clientID uuid.UUID) *Client {
+	// Server-side session checkout for implicit sessions is deferred until after checking out a
+	// connection, so don't check out a server-side session right now. This will limit the number of
+	// implicit sessions to no greater than an application's maxPoolSize.
 
-	c := &Client{
-		ClientID:    clientID,
-		SessionType: sessionType,
-		pool:        pool,
+	return &Client{
+		pool:       pool,
+		ClientID:   clientID,
+		IsImplicit: true,
 	}
+}
+
+// NewClientSession creates a new explicit client-side session.
+func NewClientSession(pool *Pool, clientID uuid.UUID, opts ...*ClientOptions) (*Client, error) {
+	c := &Client{
+		pool:     pool,
+		ClientID: clientID,
+	}
+
+	mergedOpts := mergeClientOptions(opts...)
 	if mergedOpts.DefaultReadPreference != nil {
 		c.transactionRp = mergedOpts.DefaultReadPreference
 	}
@@ -204,8 +195,9 @@ func NewClientSession(pool *Pool, clientID uuid.UUID, sessionType Type, opts ...
 		c.Snapshot = *mergedOpts.Snapshot
 	}
 
-	// The default for causalConsistency is true, unless Snapshot is enabled, then it's false. Set
-	// the default and then allow any explicit causalConsistency setting to override it.
+	// For explicit sessions, the default for causalConsistency is true, unless Snapshot is
+	// enabled, then it's false. Set the default and then allow any explicit causalConsistency
+	// setting to override it.
 	c.Consistent = !c.Snapshot
 	if mergedOpts.CausalConsistency != nil {
 		c.Consistent = *mergedOpts.CausalConsistency
@@ -215,12 +207,8 @@ func NewClientSession(pool *Pool, clientID uuid.UUID, sessionType Type, opts ...
 		return nil, errors.New("causal consistency and snapshot cannot both be set for a session")
 	}
 
-	// Server checkout for implicit sessions are deferred until after checking out a connection. This will limit the
-	// number of implicit sessions to no greater than an applications maxPoolSize.
-	if sessionType == Explicit {
-		if err := c.SetServer(); err != nil {
-			return nil, err
-		}
+	if err := c.SetServer(); err != nil {
+		return nil, err
 	}
 
 	return c, nil
@@ -243,7 +231,7 @@ func (c *Client) AdvanceClusterTime(clusterTime bson.Raw) error {
 }
 
 // AdvanceOperationTime updates the session's operation time.
-func (c *Client) AdvanceOperationTime(opTime *primitive.Timestamp) error {
+func (c *Client) AdvanceOperationTime(opTime *bson.Timestamp) error {
 	if c.Terminated {
 		return ErrSessionEnded
 	}
@@ -305,7 +293,7 @@ func (c *Client) UpdateSnapshotTime(response bsoncore.Document) {
 	}
 
 	t, i := ssTimeElem.Timestamp()
-	c.SnapshotTime = &primitive.Timestamp{
+	c.SnapshotTime = &bson.Timestamp{
 		T: t,
 		I: i,
 	}
@@ -330,9 +318,10 @@ func (c *Client) ClearPinnedResources() error {
 	return nil
 }
 
-// UnpinConnection gracefully unpins the connection associated with the session if there is one. This is done via
-// the pinned connection's UnpinFromTransaction function.
-func (c *Client) UnpinConnection() error {
+// unpinConnection gracefully unpins the connection associated with the session
+// if there is one. This is done via the pinned connection's
+// UnpinFromTransaction function.
+func (c *Client) unpinConnection() error {
 	if c == nil || c.PinnedConnection == nil {
 		return nil
 	}
@@ -352,6 +341,12 @@ func (c *Client) EndSession() {
 		return
 	}
 	c.Terminated = true
+
+	// Ignore the error when unpinning the connection because we can't do
+	// anything about it if it doesn't work. Typically the only errors that can
+	// happen here indicate that something went wrong with the connection state,
+	// like it wasn't marked as pinned or attempted to return to the wrong pool.
+	_ = c.unpinConnection()
 	c.pool.ReturnSession(c.Server)
 }
 
@@ -422,7 +417,7 @@ func (c *Client) StartTransaction(opts *TransactionOptions) error {
 		c.CurrentMct = c.transactionMaxCommitTime
 	}
 
-	if !writeconcern.AckWrite(c.CurrentWc) {
+	if !c.CurrentWc.Acknowledged() {
 		_ = c.clearTransactionOpts()
 		return ErrUnackWCUnsupported
 	}
@@ -457,12 +452,17 @@ func (c *Client) CommitTransaction() error {
 // w timeout of 10 seconds. This should be called after a commit transaction operation fails with a
 // retryable error or after a successful commit transaction operation.
 func (c *Client) UpdateCommitTransactionWriteConcern() {
-	wc := c.CurrentWc
+	wc := &writeconcern.WriteConcern{}
 	timeout := 10 * time.Second
-	if wc != nil && wc.GetWTimeout() != 0 {
-		timeout = wc.GetWTimeout()
+	if c.CurrentWc != nil {
+		*wc = *c.CurrentWc
+		if c.CurrentWc.WTimeout != 0 {
+			timeout = c.CurrentWc.WTimeout
+		}
 	}
-	c.CurrentWc = wc.WithOptions(writeconcern.WMajority(), writeconcern.WTimeout(timeout))
+	wc.W = "majority"
+	wc.WTimeout = timeout
+	c.CurrentWc = wc
 }
 
 // CheckAbortTransaction checks to see if allowed to abort transaction and returns

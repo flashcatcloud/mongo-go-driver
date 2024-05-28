@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"go.mongodb.org/mongo-driver/internal/testutil"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/internal/assert"
+	"go.mongodb.org/mongo-driver/internal/integtest"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 )
@@ -28,13 +28,13 @@ func TestOCSP(t *testing.T) {
 	shouldSucceed, err := strconv.ParseBool(successEnvVar)
 	assert.Nil(t, err, "invalid value for OCSP_TLS_SHOULD_SUCCEED; expected true or false, got %v", successEnvVar)
 
-	cs := testutil.ConnString(t)
+	cs := integtest.ConnString(t)
 
 	t.Run("tls", func(t *testing.T) {
 		clientOpts := createOCSPClientOptions(cs.Original)
-		client, err := Connect(bgCtx, clientOpts)
+		client, err := Connect(clientOpts)
 		assert.Nil(t, err, "Connect error: %v", err)
-		defer client.Disconnect(bgCtx)
+		defer func() { _ = client.Disconnect(bgCtx) }()
 
 		err = client.Ping(bgCtx, readpref.Primary())
 		if shouldSucceed {
@@ -47,9 +47,9 @@ func TestOCSP(t *testing.T) {
 	})
 	t.Run("tlsInsecure", func(t *testing.T) {
 		clientOpts := createInsecureOCSPClientOptions(cs.Original)
-		client, err := Connect(bgCtx, clientOpts)
+		client, err := Connect(clientOpts)
 		assert.Nil(t, err, "Connect error: %v", err)
-		defer client.Disconnect(bgCtx)
+		defer func() { _ = client.Disconnect(bgCtx) }()
 
 		err = client.Ping(bgCtx, readpref.Primary())
 		assert.Nil(t, err, "Ping error: %v", err)

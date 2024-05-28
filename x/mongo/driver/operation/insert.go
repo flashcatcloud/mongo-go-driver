@@ -12,8 +12,9 @@ import (
 	"fmt"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson/bsontype"
 	"go.mongodb.org/mongo-driver/event"
+	"go.mongodb.org/mongo-driver/internal/driverutil"
+	"go.mongodb.org/mongo-driver/internal/logger"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
@@ -40,6 +41,7 @@ type Insert struct {
 	result                   InsertResult
 	serverAPI                *driver.ServerAPIOptions
 	timeout                  *time.Duration
+	logger                   *logger.Logger
 }
 
 // InsertResult represents an insert result returned by the server.
@@ -110,6 +112,8 @@ func (i *Insert) Execute(ctx context.Context) error {
 		WriteConcern:      i.writeConcern,
 		ServerAPI:         i.serverAPI,
 		Timeout:           i.timeout,
+		Logger:            i.logger,
+		Name:              driverutil.InsertOp,
 	}.Execute(ctx)
 
 }
@@ -119,7 +123,7 @@ func (i *Insert) command(dst []byte, desc description.SelectedServer) ([]byte, e
 	if i.bypassDocumentValidation != nil && (desc.WireVersion != nil && desc.WireVersion.Includes(4)) {
 		dst = bsoncore.AppendBooleanElement(dst, "bypassDocumentValidation", *i.bypassDocumentValidation)
 	}
-	if i.comment.Type != bsontype.Type(0) {
+	if i.comment.Type != bsoncore.Type(0) {
 		dst = bsoncore.AppendValueElement(dst, "comment", i.comment)
 	}
 	if i.ordered != nil {
@@ -289,5 +293,15 @@ func (i *Insert) Timeout(timeout *time.Duration) *Insert {
 	}
 
 	i.timeout = timeout
+	return i
+}
+
+// Logger sets the logger for this operation.
+func (i *Insert) Logger(logger *logger.Logger) *Insert {
+	if i == nil {
+		i = new(Insert)
+	}
+
+	i.logger = logger
 	return i
 }

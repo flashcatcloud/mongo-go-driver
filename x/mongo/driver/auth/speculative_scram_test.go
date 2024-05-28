@@ -12,18 +12,19 @@ import (
 	"testing"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/internal"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/internal/assert"
+	"go.mongodb.org/mongo-driver/internal/handshake"
 	"go.mongodb.org/mongo-driver/mongo/address"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/drivertest"
+	"go.mongodb.org/mongo-driver/x/mongo/driver/mnet"
 )
 
 var (
 	// The base elements for a hello response.
 	handshakeHelloElements = [][]byte{
 		bsoncore.AppendInt32Element(nil, "ok", 1),
-		bsoncore.AppendBooleanElement(nil, internal.LegacyHelloLowercase, true),
+		bsoncore.AppendBooleanElement(nil, handshake.LegacyHelloLowercase, true),
 		bsoncore.AppendInt32Element(nil, "maxBsonObjectSize", 16777216),
 		bsoncore.AppendInt32Element(nil, "maxMessageSizeBytes", 48000000),
 		bsoncore.AppendInt32Element(nil, "minWireVersion", 0),
@@ -80,13 +81,15 @@ func TestSpeculativeSCRAM(t *testing.T) {
 					ReadResp: responses,
 				}
 
+				mnetconn := mnet.NewConnection(conn)
+
 				// Do both parts of the handshake.
-				info, err := handshaker.GetHandshakeInformation(context.Background(), address.Address("localhost:27017"), conn)
+				info, err := handshaker.GetHandshakeInformation(context.Background(), address.Address("localhost:27017"), mnetconn)
 				assert.Nil(t, err, "GetHandshakeInformation error: %v", err)
 				assert.NotNil(t, info.SpeculativeAuthenticate, "desc.SpeculativeAuthenticate not set")
 				conn.Desc = info.Description // Set conn.Desc so the new description will be used for the authentication.
 
-				err = handshaker.FinishHandshake(context.Background(), conn)
+				err = handshaker.FinishHandshake(context.Background(), mnetconn)
 				assert.Nil(t, err, "FinishHandshake error: %v", err)
 				assert.Equal(t, 0, len(conn.ReadResp), "%d messages left unread", len(conn.ReadResp))
 
@@ -95,7 +98,7 @@ func TestSpeculativeSCRAM(t *testing.T) {
 					len(tc.payloads), (conn.Written))
 				helloCmd, err := drivertest.GetCommandFromQueryWireMessage(<-conn.Written)
 				assert.Nil(t, err, "error parsing hello command: %v", err)
-				assertCommandName(t, helloCmd, internal.LegacyHello)
+				assertCommandName(t, helloCmd, handshake.LegacyHello)
 
 				// Assert that the correct document was sent for speculative authentication.
 				authDocVal, err := helloCmd.LookupErr("speculativeAuthenticate")
@@ -165,13 +168,15 @@ func TestSpeculativeSCRAM(t *testing.T) {
 					ReadResp: responses,
 				}
 
-				info, err := handshaker.GetHandshakeInformation(context.Background(), address.Address("localhost:27017"), conn)
+				mnetconn := mnet.NewConnection(conn)
+
+				info, err := handshaker.GetHandshakeInformation(context.Background(), address.Address("localhost:27017"), mnetconn)
 				assert.Nil(t, err, "GetHandshakeInformation error: %v", err)
 				assert.Nil(t, info.SpeculativeAuthenticate, "expected desc.SpeculativeAuthenticate to be unset, got %s",
 					bson.Raw(info.SpeculativeAuthenticate))
 				conn.Desc = info.Description
 
-				err = handshaker.FinishHandshake(context.Background(), conn)
+				err = handshaker.FinishHandshake(context.Background(), mnetconn)
 				assert.Nil(t, err, "FinishHandshake error: %v", err)
 				assert.Equal(t, 0, len(conn.ReadResp), "%d messages left unread", len(conn.ReadResp))
 
@@ -179,7 +184,7 @@ func TestSpeculativeSCRAM(t *testing.T) {
 					numResponses, len(conn.Written))
 				hello, err := drivertest.GetCommandFromQueryWireMessage(<-conn.Written)
 				assert.Nil(t, err, "error parsing hello command: %v", err)
-				assertCommandName(t, hello, internal.LegacyHello)
+				assertCommandName(t, hello, handshake.LegacyHello)
 				_, err = hello.LookupErr("speculativeAuthenticate")
 				assert.Nil(t, err, "expected command %s to contain 'speculativeAuthenticate'", bson.Raw(hello))
 

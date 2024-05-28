@@ -18,21 +18,21 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"go.mongodb.org/mongo-driver/internal"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/internal/assert"
 	"go.mongodb.org/mongo-driver/mongo/address"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/x/mongo/driver"
+	"go.mongodb.org/mongo-driver/x/mongo/driver/mnet"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 )
 
 type testHandshaker struct {
-	getHandshakeInformation func(context.Context, address.Address, driver.Connection) (driver.HandshakeInformation, error)
-	finishHandshake         func(context.Context, driver.Connection) error
+	getHandshakeInformation func(context.Context, address.Address, *mnet.Connection) (driver.HandshakeInformation, error)
+	finishHandshake         func(context.Context, *mnet.Connection) error
 }
 
 // GetHandshakeInformation implements the Handshaker interface.
-func (th *testHandshaker) GetHandshakeInformation(ctx context.Context, addr address.Address, conn driver.Connection) (driver.HandshakeInformation, error) {
+func (th *testHandshaker) GetHandshakeInformation(ctx context.Context, addr address.Address, conn *mnet.Connection) (driver.HandshakeInformation, error) {
 	if th.getHandshakeInformation != nil {
 		return th.getHandshakeInformation(ctx, addr, conn)
 	}
@@ -40,7 +40,7 @@ func (th *testHandshaker) GetHandshakeInformation(ctx context.Context, addr addr
 }
 
 // FinishHandshake implements the Handshaker interface.
-func (th *testHandshaker) FinishHandshake(ctx context.Context, conn driver.Connection) error {
+func (th *testHandshaker) FinishHandshake(ctx context.Context, conn *mnet.Connection) error {
 	if th.finishHandshake != nil {
 		return th.finishHandshake(ctx, conn)
 	}
@@ -79,7 +79,7 @@ func TestConnection(t *testing.T) {
 				conn := newConnection(address.Address(""),
 					WithHandshaker(func(Handshaker) Handshaker {
 						return &testHandshaker{
-							finishHandshake: func(context.Context, driver.Connection) error {
+							finishHandshake: func(context.Context, *mnet.Connection) error {
 								return err
 							},
 						}
@@ -147,7 +147,7 @@ func TestConnection(t *testing.T) {
 						_ = conn.connect(context.Background())
 					}()
 
-					// Simulate cancelling connection establishment and assert that this cleares the CancelFunc.
+					// Simulate cancelling connection establishment and assert that this clears the CancelFunc.
 					conn.closeConnectContext()
 					assert.Nil(t, conn.cancelConnectContext, "cancellation function was not cleared")
 					close(doneChan)
@@ -284,7 +284,7 @@ func TestConnection(t *testing.T) {
 						assert.True(t, ok, "expected error %v to be of type %T", connectErr, ConnectionError{})
 
 						isTimeout := func(err error) bool {
-							if err == context.DeadlineExceeded {
+							if errors.Is(err, context.DeadlineExceeded) {
 								return true
 							}
 							if ne, ok := err.(net.Error); ok {
@@ -303,11 +303,11 @@ func TestConnection(t *testing.T) {
 
 						var getInfoCtx, finishCtx context.Context
 						handshaker := &testHandshaker{
-							getHandshakeInformation: func(ctx context.Context, _ address.Address, _ driver.Connection) (driver.HandshakeInformation, error) {
+							getHandshakeInformation: func(ctx context.Context, _ address.Address, _ *mnet.Connection) (driver.HandshakeInformation, error) {
 								getInfoCtx = ctx
 								return driver.HandshakeInformation{}, nil
 							},
-							finishHandshake: func(ctx context.Context, _ driver.Connection) error {
+							finishHandshake: func(ctx context.Context, _ *mnet.Connection) error {
 								finishCtx = ctx
 								return nil
 							},
@@ -475,7 +475,7 @@ func TestConnection(t *testing.T) {
 			t.Run("closed connection", func(t *testing.T) {
 				conn := &connection{id: "foobar"}
 				want := ConnectionError{ConnectionID: "foobar", message: "connection is closed"}
-				_, got := conn.readWireMessage(context.Background(), []byte{})
+				_, got := conn.readWireMessage(context.Background())
 				if !cmp.Equal(got, want, cmp.Comparer(compareErrors)) {
 					t.Errorf("errors do not match. got %v; want %v", got, want)
 				}
@@ -509,7 +509,7 @@ func TestConnection(t *testing.T) {
 						}
 						tnc := &testNetConn{deadlineerr: errors.New("set readDeadline error")}
 						conn := &connection{id: "foobar", nc: tnc, readTimeout: tc.timeout, state: connConnected}
-						_, got := conn.readWireMessage(ctx, []byte{})
+						_, got := conn.readWireMessage(ctx)
 						if !cmp.Equal(got, want, cmp.Comparer(compareErrors)) {
 							t.Errorf("errors do not match. got %v; want %v", got, want)
 						}
@@ -528,7 +528,7 @@ func TestConnection(t *testing.T) {
 					conn.cancellationListener = listener
 
 					want := ConnectionError{ConnectionID: "foobar", Wrapped: err, message: "incomplete read of message header"}
-					_, got := conn.readWireMessage(context.Background(), []byte{})
+					_, got := conn.readWireMessage(context.Background())
 					if !cmp.Equal(got, want, cmp.Comparer(compareErrors)) {
 						t.Errorf("errors do not match. got %v; want %v", got, want)
 					}
@@ -545,7 +545,7 @@ func TestConnection(t *testing.T) {
 					conn.cancellationListener = listener
 
 					want := ConnectionError{ConnectionID: "foobar", Wrapped: err, message: "incomplete read of full message"}
-					_, got := conn.readWireMessage(context.Background(), []byte{})
+					_, got := conn.readWireMessage(context.Background())
 					if !cmp.Equal(got, want, cmp.Comparer(compareErrors)) {
 						t.Errorf("errors do not match. got %v; want %v", got, want)
 					}
@@ -581,7 +581,7 @@ func TestConnection(t *testing.T) {
 							conn.cancellationListener = listener
 
 							want := ConnectionError{ConnectionID: "foobar", Wrapped: err, message: err.Error()}
-							_, got := conn.readWireMessage(context.Background(), nil)
+							_, got := conn.readWireMessage(context.Background())
 							if !cmp.Equal(got, want, cmp.Comparer(compareErrors)) {
 								t.Errorf("errors do not match. got %v; want %v", got, want)
 							}
@@ -597,7 +597,7 @@ func TestConnection(t *testing.T) {
 					listener := newTestCancellationListener(false)
 					conn.cancellationListener = listener
 
-					got, err := conn.readWireMessage(context.Background(), nil)
+					got, err := conn.readWireMessage(context.Background())
 					noerr(t, err)
 					if !cmp.Equal(got, want) {
 						t.Errorf("did not read full wire message. got %v; want %v", got, want)
@@ -634,7 +634,7 @@ func TestConnection(t *testing.T) {
 							wg.Add(1)
 							go func() {
 								defer wg.Done()
-								_, err = conn.readWireMessage(ctx, nil)
+								_, err = conn.readWireMessage(ctx)
 							}()
 
 							<-nc.operationStartedChan
@@ -656,7 +656,7 @@ func TestConnection(t *testing.T) {
 					conn.cancellationListener = listener
 
 					want := ConnectionError{ConnectionID: conn.id, Wrapped: context.Canceled, message: "unable to read server response"}
-					_, err := conn.readWireMessage(context.Background(), nil)
+					_, err := conn.readWireMessage(context.Background())
 					assert.Equal(t, want, err, "expected error %v, got %v", want, err)
 					assert.Equal(t, connDisconnected, conn.state, "expected connection state %v, got %v", connDisconnected,
 						conn.state)
@@ -668,7 +668,7 @@ func TestConnection(t *testing.T) {
 				conn := newConnection(address.Address(""),
 					WithHandshaker(func(Handshaker) Handshaker {
 						return &testHandshaker{
-							finishHandshake: func(context.Context, driver.Connection) error {
+							finishHandshake: func(context.Context, *mnet.Connection) error {
 								return errors.New("handshake err")
 							},
 						}
@@ -713,11 +713,11 @@ func TestConnection(t *testing.T) {
 			var want, got interface{}
 
 			want = ErrConnectionClosed
-			got = conn.WriteWireMessage(context.Background(), nil)
+			got = conn.Write(context.Background(), nil)
 			if !cmp.Equal(got, want, cmp.Comparer(compareErrors)) {
 				t.Errorf("errors do not match. got %v; want %v", got, want)
 			}
-			_, got = conn.ReadWireMessage(context.Background(), nil)
+			_, got = conn.Read(context.Background())
 			if !cmp.Equal(got, want, cmp.Comparer(compareErrors)) {
 				t.Errorf("errors do not match. got %v; want %v", got, want)
 			}
@@ -761,6 +761,12 @@ func TestConnection(t *testing.T) {
 			got = conn.LocalAddress()
 			if !cmp.Equal(got, want) {
 				t.Errorf("LocalAddresses do not match. got %v; want %v", got, want)
+			}
+
+			want = (*int64)(nil)
+			got = conn.ServerConnectionID()
+			if !cmp.Equal(got, want) {
+				t.Errorf("ServerConnectionIDs do not match. got %v; want %v", got, want)
 			}
 		})
 
@@ -1139,7 +1145,7 @@ func (wfc *writeFailConn) Write([]byte) (int, error) {
 	return 0, errors.New("Write error")
 }
 
-func (wfc *writeFailConn) SetWriteDeadline(t time.Time) error {
+func (wfc *writeFailConn) SetWriteDeadline(time.Time) error {
 	return nil
 }
 
@@ -1189,7 +1195,7 @@ func (d *dialer) lenclosed() int {
 }
 
 type testCancellationListener struct {
-	listener         *internal.CancellationListener
+	listener         *cancellListener
 	numListen        int
 	numStopListening int
 	aborted          bool
@@ -1199,7 +1205,7 @@ type testCancellationListener struct {
 // returned by the StopListening method.
 func newTestCancellationListener(aborted bool) *testCancellationListener {
 	return &testCancellationListener{
-		listener: internal.NewCancellationListener(),
+		listener: newCancellListener(),
 		aborted:  aborted,
 	}
 }

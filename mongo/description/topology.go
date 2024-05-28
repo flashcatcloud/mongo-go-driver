@@ -17,7 +17,7 @@ type Topology struct {
 	Servers               []Server
 	SetName               string
 	Kind                  TopologyKind
-	SessionTimeoutMinutes uint32
+	SessionTimeoutMinutes *int64
 	CompatibilityErr      error
 }
 

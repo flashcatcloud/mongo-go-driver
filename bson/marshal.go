@@ -9,30 +9,39 @@ package bson
 import (
 	"bytes"
 	"encoding/json"
-
-	"go.mongodb.org/mongo-driver/bson/bsoncodec"
-	"go.mongodb.org/mongo-driver/bson/bsonrw"
-	"go.mongodb.org/mongo-driver/bson/bsontype"
+	"sync"
 )
 
 const defaultDstCap = 256
 
-var bvwPool = bsonrw.NewBSONValueWriterPool()
-var extjPool = bsonrw.NewExtJSONValueWriterPool()
+var extjPool = NewExtJSONValueWriterPool()
 
-// Marshaler is an interface implemented by types that can marshal themselves
-// into a BSON document represented as bytes. The bytes returned must be a valid
-// BSON document if the error is nil.
+// Marshaler is the interface implemented by types that can marshal themselves
+// into a valid BSON document.
+//
+// Implementations of Marshaler must return a full BSON document. To create
+// custom BSON marshaling behavior for individual values in a BSON document,
+// implement the ValueMarshaler interface instead.
 type Marshaler interface {
 	MarshalBSON() ([]byte, error)
 }
 
-// ValueMarshaler is an interface implemented by types that can marshal
-// themselves into a BSON value as bytes. The type must be the valid type for
-// the bytes returned. The bytes and byte type together must be valid if the
-// error is nil.
+// ValueMarshaler is the interface implemented by types that can marshal
+// themselves into a valid BSON value. The format of the returned bytes must
+// match the returned type.
+//
+// Implementations of ValueMarshaler must return an individual BSON value. To
+// create custom BSON marshaling behavior for an entire BSON document, implement
+// the Marshaler interface instead.
 type ValueMarshaler interface {
-	MarshalBSONValue() (bsontype.Type, []byte, error)
+	MarshalBSONValue() (Type, []byte, error)
+}
+
+// Pool of buffers for marshalling BSON.
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		return new(bytes.Buffer)
+	},
 }
 
 // Marshal returns the BSON encoding of val as a BSON document. If val is not a type that can be transformed into a
@@ -42,115 +51,59 @@ type ValueMarshaler interface {
 // marshal val into a []byte. Marshal will inspect struct tags and alter the
 // marshaling process accordingly.
 func Marshal(val interface{}) ([]byte, error) {
-	return MarshalWithRegistry(DefaultRegistry, val)
-}
-
-// MarshalAppend will encode val as a BSON document and append the bytes to dst. If dst is not large enough to hold the
-// bytes, it will be grown. If val is not a type that can be transformed into a document, MarshalValueAppend should be
-// used instead.
-func MarshalAppend(dst []byte, val interface{}) ([]byte, error) {
-	return MarshalAppendWithRegistry(DefaultRegistry, dst, val)
-}
-
-// MarshalWithRegistry returns the BSON encoding of val as a BSON document. If val is not a type that can be transformed
-// into a document, MarshalValueWithRegistry should be used instead.
-func MarshalWithRegistry(r *bsoncodec.Registry, val interface{}) ([]byte, error) {
-	dst := make([]byte, 0)
-	return MarshalAppendWithRegistry(r, dst, val)
-}
-
-// MarshalWithContext returns the BSON encoding of val as a BSON document using EncodeContext ec. If val is not a type
-// that can be transformed into a document, MarshalValueWithContext should be used instead.
-func MarshalWithContext(ec bsoncodec.EncodeContext, val interface{}) ([]byte, error) {
-	dst := make([]byte, 0)
-	return MarshalAppendWithContext(ec, dst, val)
-}
-
-// MarshalAppendWithRegistry will encode val as a BSON document using Registry r and append the bytes to dst. If dst is
-// not large enough to hold the bytes, it will be grown. If val is not a type that can be transformed into a document,
-// MarshalValueAppendWithRegistry should be used instead.
-func MarshalAppendWithRegistry(r *bsoncodec.Registry, dst []byte, val interface{}) ([]byte, error) {
-	return MarshalAppendWithContext(bsoncodec.EncodeContext{Registry: r}, dst, val)
-}
-
-// MarshalAppendWithContext will encode val as a BSON document using Registry r and EncodeContext ec and append the
-// bytes to dst. If dst is not large enough to hold the bytes, it will be grown. If val is not a type that can be
-// transformed into a document, MarshalValueAppendWithContext should be used instead.
-func MarshalAppendWithContext(ec bsoncodec.EncodeContext, dst []byte, val interface{}) ([]byte, error) {
-	sw := new(bsonrw.SliceWriter)
-	*sw = dst
-	vw := bvwPool.Get(sw)
-	defer bvwPool.Put(vw)
-
+	sw := bufPool.Get().(*bytes.Buffer)
+	defer func() {
+		// Proper usage of a sync.Pool requires each entry to have approximately
+		// the same memory cost. To obtain this property when the stored type
+		// contains a variably-sized buffer, we add a hard limit on the maximum
+		// buffer to place back in the pool. We limit the size to 16MiB because
+		// that's the maximum wire message size supported by any current MongoDB
+		// server.
+		//
+		// Comment based on
+		// https://cs.opensource.google/go/go/+/refs/tags/go1.19:src/fmt/print.go;l=147
+		//
+		// Recycle byte slices that are smaller than 16MiB and at least half
+		// occupied.
+		if sw.Cap() < 16*1024*1024 && sw.Cap()/2 < sw.Len() {
+			bufPool.Put(sw)
+		}
+	}()
+	sw.Reset()
+	vw := NewValueWriter(sw)
 	enc := encPool.Get().(*Encoder)
 	defer encPool.Put(enc)
-
-	err := enc.Reset(vw)
+	enc.Reset(vw)
+	enc.SetRegistry(DefaultRegistry)
+	err := enc.Encode(val)
 	if err != nil {
 		return nil, err
 	}
-	err = enc.SetContext(ec)
-	if err != nil {
-		return nil, err
-	}
-
-	err = enc.Encode(val)
-	if err != nil {
-		return nil, err
-	}
-
-	return *sw, nil
+	buf := append([]byte(nil), sw.Bytes()...)
+	return buf, nil
 }
 
 // MarshalValue returns the BSON encoding of val.
 //
 // MarshalValue will use bson.DefaultRegistry to transform val into a BSON value. If val is a struct, this function will
 // inspect struct tags and alter the marshalling process accordingly.
-func MarshalValue(val interface{}) (bsontype.Type, []byte, error) {
+func MarshalValue(val interface{}) (Type, []byte, error) {
 	return MarshalValueWithRegistry(DefaultRegistry, val)
 }
 
-// MarshalValueAppend will append the BSON encoding of val to dst. If dst is not large enough to hold the BSON encoding
-// of val, dst will be grown.
-func MarshalValueAppend(dst []byte, val interface{}) (bsontype.Type, []byte, error) {
-	return MarshalValueAppendWithRegistry(DefaultRegistry, dst, val)
-}
-
 // MarshalValueWithRegistry returns the BSON encoding of val using Registry r.
-func MarshalValueWithRegistry(r *bsoncodec.Registry, val interface{}) (bsontype.Type, []byte, error) {
-	dst := make([]byte, 0)
-	return MarshalValueAppendWithRegistry(r, dst, val)
-}
-
-// MarshalValueWithContext returns the BSON encoding of val using EncodeContext ec.
-func MarshalValueWithContext(ec bsoncodec.EncodeContext, val interface{}) (bsontype.Type, []byte, error) {
-	dst := make([]byte, 0)
-	return MarshalValueAppendWithContext(ec, dst, val)
-}
-
-// MarshalValueAppendWithRegistry will append the BSON encoding of val to dst using Registry r. If dst is not large
-// enough to hold the BSON encoding of val, dst will be grown.
-func MarshalValueAppendWithRegistry(r *bsoncodec.Registry, dst []byte, val interface{}) (bsontype.Type, []byte, error) {
-	return MarshalValueAppendWithContext(bsoncodec.EncodeContext{Registry: r}, dst, val)
-}
-
-// MarshalValueAppendWithContext will append the BSON encoding of val to dst using EncodeContext ec. If dst is not large
-// enough to hold the BSON encoding of val, dst will be grown.
-func MarshalValueAppendWithContext(ec bsoncodec.EncodeContext, dst []byte, val interface{}) (bsontype.Type, []byte, error) {
-	// get a ValueWriter configured to write to dst
-	sw := new(bsonrw.SliceWriter)
-	*sw = dst
-	vwFlusher := bvwPool.GetAtModeElement(sw)
+//
+// Deprecated: Using a custom registry to marshal individual BSON values will not be supported in Go
+// Driver 2.0.
+func MarshalValueWithRegistry(r *Registry, val interface{}) (Type, []byte, error) {
+	sw := SliceWriter(make([]byte, 0))
+	vwFlusher := bvwPool.GetAtModeElement(&sw)
 
 	// get an Encoder and encode the value
 	enc := encPool.Get().(*Encoder)
 	defer encPool.Put(enc)
-	if err := enc.Reset(vwFlusher); err != nil {
-		return 0, nil, err
-	}
-	if err := enc.SetContext(ec); err != nil {
-		return 0, nil, err
-	}
+	enc.Reset(vwFlusher)
+	enc.ec = EncodeContext{Registry: r}
 	if err := enc.Encode(val); err != nil {
 		return 0, nil, err
 	}
@@ -161,68 +114,27 @@ func MarshalValueAppendWithContext(ec bsoncodec.EncodeContext, dst []byte, val i
 	if err := vwFlusher.Flush(); err != nil {
 		return 0, nil, err
 	}
-	buffer := *sw
-	return bsontype.Type(buffer[0]), buffer[2:], nil
+	return Type(sw[0]), sw[2:], nil
 }
 
 // MarshalExtJSON returns the extended JSON encoding of val.
 func MarshalExtJSON(val interface{}, canonical, escapeHTML bool) ([]byte, error) {
-	return MarshalExtJSONWithRegistry(DefaultRegistry, val, canonical, escapeHTML)
-}
-
-// MarshalExtJSONAppend will append the extended JSON encoding of val to dst.
-// If dst is not large enough to hold the extended JSON encoding of val, dst
-// will be grown.
-func MarshalExtJSONAppend(dst []byte, val interface{}, canonical, escapeHTML bool) ([]byte, error) {
-	return MarshalExtJSONAppendWithRegistry(DefaultRegistry, dst, val, canonical, escapeHTML)
-}
-
-// MarshalExtJSONWithRegistry returns the extended JSON encoding of val using Registry r.
-func MarshalExtJSONWithRegistry(r *bsoncodec.Registry, val interface{}, canonical, escapeHTML bool) ([]byte, error) {
-	dst := make([]byte, 0, defaultDstCap)
-	return MarshalExtJSONAppendWithContext(bsoncodec.EncodeContext{Registry: r}, dst, val, canonical, escapeHTML)
-}
-
-// MarshalExtJSONWithContext returns the extended JSON encoding of val using Registry r.
-func MarshalExtJSONWithContext(ec bsoncodec.EncodeContext, val interface{}, canonical, escapeHTML bool) ([]byte, error) {
-	dst := make([]byte, 0, defaultDstCap)
-	return MarshalExtJSONAppendWithContext(ec, dst, val, canonical, escapeHTML)
-}
-
-// MarshalExtJSONAppendWithRegistry will append the extended JSON encoding of
-// val to dst using Registry r. If dst is not large enough to hold the BSON
-// encoding of val, dst will be grown.
-func MarshalExtJSONAppendWithRegistry(r *bsoncodec.Registry, dst []byte, val interface{}, canonical, escapeHTML bool) ([]byte, error) {
-	return MarshalExtJSONAppendWithContext(bsoncodec.EncodeContext{Registry: r}, dst, val, canonical, escapeHTML)
-}
-
-// MarshalExtJSONAppendWithContext will append the extended JSON encoding of
-// val to dst using Registry r. If dst is not large enough to hold the BSON
-// encoding of val, dst will be grown.
-func MarshalExtJSONAppendWithContext(ec bsoncodec.EncodeContext, dst []byte, val interface{}, canonical, escapeHTML bool) ([]byte, error) {
-	sw := new(bsonrw.SliceWriter)
-	*sw = dst
-	ejvw := extjPool.Get(sw, canonical, escapeHTML)
+	sw := SliceWriter(make([]byte, 0, defaultDstCap))
+	ejvw := extjPool.Get(&sw, canonical, escapeHTML)
 	defer extjPool.Put(ejvw)
 
 	enc := encPool.Get().(*Encoder)
 	defer encPool.Put(enc)
 
-	err := enc.Reset(ejvw)
-	if err != nil {
-		return nil, err
-	}
-	err = enc.SetContext(ec)
+	enc.Reset(ejvw)
+	enc.ec = EncodeContext{Registry: DefaultRegistry}
+
+	err := enc.Encode(val)
 	if err != nil {
 		return nil, err
 	}
 
-	err = enc.Encode(val)
-	if err != nil {
-		return nil, err
-	}
-
-	return *sw, nil
+	return sw, nil
 }
 
 // IndentExtJSON will prefix and indent the provided extended JSON src and append it to dst.

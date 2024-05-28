@@ -13,8 +13,9 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/bsontype"
 	"go.mongodb.org/mongo-driver/event"
+	"go.mongodb.org/mongo-driver/internal/driverutil"
+	"go.mongodb.org/mongo-driver/internal/logger"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
@@ -44,6 +45,7 @@ type Update struct {
 	serverAPI                *driver.ServerAPIOptions
 	let                      bsoncore.Document
 	timeout                  *time.Duration
+	logger                   *logger.Logger
 }
 
 // Upsert contains the information for an upsert in an Update operation.
@@ -162,6 +164,8 @@ func (u *Update) Execute(ctx context.Context) error {
 		Crypt:             u.crypt,
 		ServerAPI:         u.serverAPI,
 		Timeout:           u.timeout,
+		Logger:            u.logger,
+		Name:              driverutil.UpdateOp,
 	}.Execute(ctx)
 
 }
@@ -173,7 +177,7 @@ func (u *Update) command(dst []byte, desc description.SelectedServer) ([]byte, e
 
 		dst = bsoncore.AppendBooleanElement(dst, "bypassDocumentValidation", *u.bypassDocumentValidation)
 	}
-	if u.comment.Type != bsontype.Type(0) {
+	if u.comment.Type != bsoncore.Type(0) {
 		dst = bsoncore.AppendValueElement(dst, "comment", u.comment)
 	}
 	if u.ordered != nil {
@@ -397,5 +401,15 @@ func (u *Update) Timeout(timeout *time.Duration) *Update {
 	}
 
 	u.timeout = timeout
+	return u
+}
+
+// Logger sets the logger for this operation.
+func (u *Update) Logger(logger *logger.Logger) *Update {
+	if u == nil {
+		u = new(Update)
+	}
+
+	u.logger = logger
 	return u
 }

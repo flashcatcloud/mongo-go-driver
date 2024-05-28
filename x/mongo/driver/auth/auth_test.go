@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/internal/require"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 	. "go.mongodb.org/mongo-driver/x/mongo/driver/auth"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
@@ -53,27 +53,6 @@ func compareResponses(t *testing.T, wm []byte, expectedPayload bsoncore.Document
 	}
 	var actualPayload bsoncore.Document
 	switch opcode {
-	case wiremessage.OpQuery:
-		_, wm, ok := wiremessage.ReadQueryFlags(wm)
-		if !ok {
-			t.Fatalf("wiremessage is too short to unmarshal")
-		}
-		_, wm, ok = wiremessage.ReadQueryFullCollectionName(wm)
-		if !ok {
-			t.Fatalf("wiremessage is too short to unmarshal")
-		}
-		_, wm, ok = wiremessage.ReadQueryNumberToSkip(wm)
-		if !ok {
-			t.Fatalf("wiremessage is too short to unmarshal")
-		}
-		_, wm, ok = wiremessage.ReadQueryNumberToReturn(wm)
-		if !ok {
-			t.Fatalf("wiremessage is too short to unmarshal")
-		}
-		actualPayload, _, ok = wiremessage.ReadQueryQuery(wm)
-		if !ok {
-			t.Fatalf("wiremessage is too short to unmarshal")
-		}
 	case wiremessage.OpMsg:
 		// Append the $db field.
 		elems, err := expectedPayload.Elements()
@@ -101,14 +80,12 @@ func compareResponses(t *testing.T, wm []byte, expectedPayload bsoncore.Document
 			stype, wm, ok = wiremessage.ReadMsgSectionType(wm)
 			if !ok {
 				t.Fatalf("wiremessage is too short to unmarshal")
-				break
 			}
 			switch stype {
 			case wiremessage.DocumentSequence:
 				_, _, wm, ok = wiremessage.ReadMsgSectionDocumentSequence(wm)
 				if !ok {
 					t.Fatalf("wiremessage is too short to unmarshal")
-					break loop
 				}
 			case wiremessage.SingleDocument:
 				actualPayload, wm, ok = wiremessage.ReadMsgSectionSingleDocument(wm)

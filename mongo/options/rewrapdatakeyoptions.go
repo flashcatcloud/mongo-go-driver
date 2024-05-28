@@ -32,21 +32,3 @@ func (rmdko *RewrapManyDataKeyOptions) SetMasterKey(masterKey interface{}) *Rewr
 	rmdko.MasterKey = masterKey
 	return rmdko
 }
-
-// MergeRewrapManyDataKeyOptions combines the given RewrapManyDataKeyOptions instances into a single
-// RewrapManyDataKeyOptions in a last one wins fashion.
-func MergeRewrapManyDataKeyOptions(opts ...*RewrapManyDataKeyOptions) *RewrapManyDataKeyOptions {
-	rmdkOpts := RewrapManyDataKey()
-	for _, rmdko := range opts {
-		if rmdko == nil {
-			continue
-		}
-		if provider := rmdko.Provider; provider != nil {
-			rmdkOpts.Provider = provider
-		}
-		if masterKey := rmdko.MasterKey; masterKey != nil {
-			rmdkOpts.MasterKey = masterKey
-		}
-	}
-	return rmdkOpts
-}

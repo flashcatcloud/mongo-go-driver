@@ -10,11 +10,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/bsoncodec"
 	"go.mongodb.org/mongo-driver/event"
+	"go.mongodb.org/mongo-driver/internal/httputil"
+	"go.mongodb.org/mongo-driver/internal/logger"
 	"go.mongodb.org/mongo-driver/internal/uuid"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -38,7 +40,7 @@ const (
 var (
 	// keyVaultCollOpts specifies options used to communicate with the key vault collection
 	keyVaultCollOpts = options.Collection().SetReadConcern(readconcern.Majority()).
-				SetWriteConcern(writeconcern.New(writeconcern.WMajority()))
+				SetWriteConcern(writeconcern.Majority())
 
 	endSessionsBatchSize = 10000
 )
@@ -58,12 +60,15 @@ type Client struct {
 	readPreference *readpref.ReadPref
 	readConcern    *readconcern.ReadConcern
 	writeConcern   *writeconcern.WriteConcern
-	registry       *bsoncodec.Registry
+	bsonOpts       *options.BSONOptions
+	registry       *bson.Registry
 	monitor        *event.CommandMonitor
 	serverAPI      *driver.ServerAPIOptions
 	serverMonitor  *event.ServerMonitor
 	sessionPool    *session.Pool
 	timeout        *time.Duration
+	httpClient     *http.Client
+	logger         *logger.Logger
 
 	// client-side encryption fields
 	keyVaultClientFLE  *Client
@@ -75,8 +80,7 @@ type Client struct {
 	encryptedFieldsMap map[string]interface{}
 }
 
-// Connect creates a new Client and then initializes it using the Connect method. This is equivalent to calling
-// NewClient followed by Client.Connect.
+// Connect creates a new Client and then initializes it using the Connect method.
 //
 // When creating an options.ClientOptions, the order the methods are called matters. Later Set*
 // methods will overwrite the values from previous Set* method invocations. This includes the
@@ -97,19 +101,19 @@ type Client struct {
 //
 // The Client.Ping method can be used to verify that the deployment is successfully connected and the
 // Client was correctly configured.
-func Connect(ctx context.Context, opts ...*options.ClientOptions) (*Client, error) {
-	c, err := NewClient(opts...)
+func Connect(opts ...*options.ClientOptions) (*Client, error) {
+	c, err := newClient(opts...)
 	if err != nil {
 		return nil, err
 	}
-	err = c.Connect(ctx)
+	err = c.connect()
 	if err != nil {
 		return nil, err
 	}
 	return c, nil
 }
 
-// NewClient creates a new client to connect to a deployment specified by the uri.
+// newClient creates a new client to connect to a deployment specified by the uri.
 //
 // When creating an options.ClientOptions, the order the methods are called matters. Later Set*
 // methods will overwrite the values from previous Set* method invocations. This includes the
@@ -122,7 +126,7 @@ func Connect(ctx context.Context, opts ...*options.ClientOptions) (*Client, erro
 // option fields of previous options, there is no partial overwriting. For example, if Username is
 // set in the Auth field for the first option, and Password is set for the second but with no
 // Username, after the merge the Username field will be empty.
-func NewClient(opts ...*options.ClientOptions) (*Client, error) {
+func newClient(opts ...*options.ClientOptions) (*Client, error) {
 	clientOpt := options.MergeClientOptions(opts...)
 
 	id, err := uuid.New()
@@ -148,7 +152,7 @@ func NewClient(opts ...*options.ClientOptions) (*Client, error) {
 		client.serverMonitor = clientOpt.ServerMonitor
 	}
 	// ReadConcern
-	client.readConcern = readconcern.New()
+	client.readConcern = &readconcern.ReadConcern{}
 	if clientOpt.ReadConcern != nil {
 		client.readConcern = clientOpt.ReadConcern
 	}
@@ -156,6 +160,10 @@ func NewClient(opts ...*options.ClientOptions) (*Client, error) {
 	client.readPreference = readpref.Primary()
 	if clientOpt.ReadPreference != nil {
 		client.readPreference = clientOpt.ReadPreference
+	}
+	// BSONOptions
+	if clientOpt.BSONOptions != nil {
+		client.bsonOpts = clientOpt.BSONOptions
 	}
 	// Registry
 	client.registry = bson.DefaultRegistry
@@ -173,6 +181,7 @@ func NewClient(opts ...*options.ClientOptions) (*Client, error) {
 	}
 	// Timeout
 	client.timeout = clientOpt.Timeout
+	client.httpClient = clientOpt.HTTPClient
 	// WriteConcern
 	if clientOpt.WriteConcern != nil {
 		client.writeConcern = clientOpt.WriteConcern
@@ -212,15 +221,22 @@ func NewClient(opts ...*options.ClientOptions) (*Client, error) {
 			return nil, replaceErrors(err)
 		}
 	}
+
+	// Create a logger for the client.
+	client.logger, err = newLogger(clientOpt.LoggerOptions)
+	if err != nil {
+		return nil, fmt.Errorf("invalid logger options: %w", err)
+	}
+
 	return client, nil
 }
 
-// Connect initializes the Client by starting background monitoring goroutines.
+// connect initializes the Client by starting background monitoring goroutines.
 // If the Client was created using the NewClient function, this method must be called before a Client can be used.
 //
 // Connect starts background goroutines to monitor the state of the deployment and does not do any I/O in the main
 // goroutine. The Client.Ping method can be used to verify that the connection was created successfully.
-func (c *Client) Connect(ctx context.Context) error {
+func (c *Client) connect() error {
 	if connector, ok := c.deployment.(driver.Connector); ok {
 		err := connector.Connect()
 		if err != nil {
@@ -229,25 +245,25 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	if c.mongocryptdFLE != nil {
-		if err := c.mongocryptdFLE.connect(ctx); err != nil {
+		if err := c.mongocryptdFLE.connect(); err != nil {
 			return err
 		}
 	}
 
 	if c.internalClientFLE != nil {
-		if err := c.internalClientFLE.Connect(ctx); err != nil {
+		if err := c.internalClientFLE.connect(); err != nil {
 			return err
 		}
 	}
 
 	if c.keyVaultClientFLE != nil && c.keyVaultClientFLE != c.internalClientFLE && c.keyVaultClientFLE != c {
-		if err := c.keyVaultClientFLE.Connect(ctx); err != nil {
+		if err := c.keyVaultClientFLE.connect(); err != nil {
 			return err
 		}
 	}
 
 	if c.metadataClientFLE != nil && c.metadataClientFLE != c.internalClientFLE && c.metadataClientFLE != c {
-		if err := c.metadataClientFLE.Connect(ctx); err != nil {
+		if err := c.metadataClientFLE.connect(); err != nil {
 			return err
 		}
 	}
@@ -273,8 +289,16 @@ func (c *Client) Connect(ctx context.Context) error {
 // or write operations. If this method returns with no errors, all connections
 // associated with this Client have been closed.
 func (c *Client) Disconnect(ctx context.Context) error {
+	if c.logger != nil {
+		defer c.logger.Close()
+	}
+
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	if c.httpClient == httputil.DefaultHTTPClient {
+		defer httputil.CloseIdleHTTPConnections(c.httpClient)
 	}
 
 	c.endSessions(ctx)
@@ -307,6 +331,7 @@ func (c *Client) Disconnect(ctx context.Context) error {
 	if disconnector, ok := c.deployment.(driver.Disconnector); ok {
 		return replaceErrors(disconnector.Disconnect(ctx))
 	}
+
 	return nil
 }
 
@@ -348,12 +373,38 @@ func (c *Client) Ping(ctx context.Context, rp *readpref.ReadPref) error {
 //
 // If the DefaultReadConcern, DefaultWriteConcern, or DefaultReadPreference options are not set, the client's read
 // concern, write concern, or read preference will be used, respectively.
-func (c *Client) StartSession(opts ...*options.SessionOptions) (Session, error) {
+func (c *Client) StartSession(opts ...*options.SessionOptions) (*Session, error) {
 	if c.sessionPool == nil {
 		return nil, ErrClientDisconnected
 	}
 
-	sopts := options.MergeSessionOptions(opts...)
+	sopts := options.Session()
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if opt.CausalConsistency != nil {
+			sopts.CausalConsistency = opt.CausalConsistency
+		}
+		if opt.DefaultReadConcern != nil {
+			sopts.DefaultReadConcern = opt.DefaultReadConcern
+		}
+		if opt.DefaultReadPreference != nil {
+			sopts.DefaultReadPreference = opt.DefaultReadPreference
+		}
+		if opt.DefaultWriteConcern != nil {
+			sopts.DefaultWriteConcern = opt.DefaultWriteConcern
+		}
+		if opt.DefaultMaxCommitTime != nil {
+			sopts.DefaultMaxCommitTime = opt.DefaultMaxCommitTime
+		}
+		if opt.Snapshot != nil {
+			sopts.Snapshot = opt.Snapshot
+		}
+	}
+	if sopts.CausalConsistency == nil && (sopts.Snapshot == nil || !*sopts.Snapshot) {
+		sopts.CausalConsistency = &options.DefaultCausalConsistency
+	}
 	coreOpts := &session.ClientOptions{
 		DefaultReadConcern:    c.readConcern,
 		DefaultReadPreference: c.readPreference,
@@ -378,7 +429,7 @@ func (c *Client) StartSession(opts ...*options.SessionOptions) (Session, error) 
 		coreOpts.Snapshot = sopts.Snapshot
 	}
 
-	sess, err := session.NewClientSession(c.sessionPool, c.id, session.Explicit, coreOpts)
+	sess, err := session.NewClientSession(c.sessionPool, c.id, coreOpts)
 	if err != nil {
 		return nil, replaceErrors(err)
 	}
@@ -387,7 +438,7 @@ func (c *Client) StartSession(opts ...*options.SessionOptions) (Session, error) 
 	sess.RetryWrite = false
 	sess.RetryRead = c.retryReads
 
-	return &sessionImpl{
+	return &Session{
 		clientSession: sess,
 		client:        c,
 		deployment:    c.deployment,
@@ -436,14 +487,14 @@ func (c *Client) configureAutoEncryption(clientOpts *options.ClientOptions) erro
 		return err
 	}
 
-	// If the crypt_shared library was loaded successfully, signal to the mongocryptd client creator
-	// that it can bypass spawning mongocryptd.
-	cryptSharedLibAvailable := mc.CryptSharedLibVersionString() != ""
-	mongocryptdFLE, err := newMongocryptdClient(cryptSharedLibAvailable, clientOpts.AutoEncryptionOptions)
-	if err != nil {
-		return err
+	// If the crypt_shared library was not loaded, try to spawn and connect to mongocryptd.
+	if mc.CryptSharedLibVersionString() == "" {
+		mongocryptdFLE, err := newMongocryptdClient(clientOpts.AutoEncryptionOptions)
+		if err != nil {
+			return err
+		}
+		c.mongocryptdFLE = mongocryptdFLE
 	}
-	c.mongocryptdFLE = mongocryptdFLE
 
 	c.configureCryptFLE(mc, clientOpts.AutoEncryptionOptions)
 	return nil
@@ -458,7 +509,7 @@ func (c *Client) getOrCreateInternalClient(clientOpts *options.ClientOptions) (*
 	internalClientOpts.AutoEncryptionOptions = nil
 	internalClientOpts.SetMinPoolSize(0)
 	var err error
-	c.internalClientFLE, err = NewClient(internalClientOpts)
+	c.internalClientFLE, err = newClient(internalClientOpts)
 	return c.internalClientFLE, err
 }
 
@@ -468,7 +519,7 @@ func (c *Client) configureKeyVaultClientFLE(clientOpts *options.ClientOptions) e
 	aeOpts := clientOpts.AutoEncryptionOptions
 	switch {
 	case aeOpts.KeyVaultClientOptions != nil:
-		c.keyVaultClientFLE, err = NewClient(aeOpts.KeyVaultClientOptions)
+		c.keyVaultClientFLE, err = newClient(aeOpts.KeyVaultClientOptions)
 	case clientOpts.MaxPoolSize != nil && *clientOpts.MaxPoolSize == 0:
 		c.keyVaultClientFLE = c
 	default:
@@ -505,7 +556,7 @@ func (c *Client) newMongoCrypt(opts *options.AutoEncryptionOptions) (*mongocrypt
 	// convert schemas in SchemaMap to bsoncore documents
 	cryptSchemaMap := make(map[string]bsoncore.Document)
 	for k, v := range opts.SchemaMap {
-		schema, err := transformBsoncoreDocument(c.registry, v, true, "schemaMap")
+		schema, err := marshal(v, c.bsonOpts, c.registry)
 		if err != nil {
 			return nil, err
 		}
@@ -515,16 +566,16 @@ func (c *Client) newMongoCrypt(opts *options.AutoEncryptionOptions) (*mongocrypt
 	// convert schemas in EncryptedFieldsMap to bsoncore documents
 	cryptEncryptedFieldsMap := make(map[string]bsoncore.Document)
 	for k, v := range opts.EncryptedFieldsMap {
-		encryptedFields, err := transformBsoncoreDocument(c.registry, v, true, "encryptedFieldsMap")
+		encryptedFields, err := marshal(v, c.bsonOpts, c.registry)
 		if err != nil {
 			return nil, err
 		}
 		cryptEncryptedFieldsMap[k] = encryptedFields
 	}
 
-	kmsProviders, err := transformBsoncoreDocument(c.registry, opts.KmsProviders, true, "kmsProviders")
+	kmsProviders, err := marshal(opts.KmsProviders, c.bsonOpts, c.registry)
 	if err != nil {
-		return nil, fmt.Errorf("error creating KMS providers document: %v", err)
+		return nil, fmt.Errorf("error creating KMS providers document: %w", err)
 	}
 
 	// Set the crypt_shared library override path from the "cryptSharedLibPath" extra option if one
@@ -556,7 +607,8 @@ func (c *Client) newMongoCrypt(opts *options.AutoEncryptionOptions) (*mongocrypt
 		SetBypassQueryAnalysis(bypassQueryAnalysis).
 		SetEncryptedFieldsMap(cryptEncryptedFieldsMap).
 		SetCryptSharedLibDisabled(cryptSharedLibDisabled || bypassAutoEncryption).
-		SetCryptSharedLibOverridePath(cryptSharedLibPath))
+		SetCryptSharedLibOverridePath(cryptSharedLibPath).
+		SetHTTPClient(opts.HTTPClient))
 	if err != nil {
 		return nil, err
 	}
@@ -638,10 +690,7 @@ func (c *Client) ListDatabases(ctx context.Context, filter interface{}, opts ...
 		return ListDatabasesResult{}, err
 	}
 	if sess == nil && c.sessionPool != nil {
-		sess, err = session.NewClientSession(c.sessionPool, c.id, session.Implicit)
-		if err != nil {
-			return ListDatabasesResult{}, err
-		}
+		sess = session.NewImplicitClientSession(c.sessionPool, c.id)
 		defer sess.EndSession()
 	}
 
@@ -650,7 +699,7 @@ func (c *Client) ListDatabases(ctx context.Context, filter interface{}, opts ...
 		return ListDatabasesResult{}, err
 	}
 
-	filterDoc, err := transformBsoncoreDocument(c.registry, filter, true, "filter")
+	filterDoc, err := marshal(filter, c.bsonOpts, c.registry)
 	if err != nil {
 		return ListDatabasesResult{}, err
 	}
@@ -661,7 +710,18 @@ func (c *Client) ListDatabases(ctx context.Context, filter interface{}, opts ...
 	})
 	selector = makeReadPrefSelector(sess, selector, c.localThreshold)
 
-	ldo := options.MergeListDatabasesOptions(opts...)
+	ldo := options.ListDatabases()
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if opt.NameOnly != nil {
+			ldo.NameOnly = opt.NameOnly
+		}
+		if opt.AuthorizedDatabases != nil {
+			ldo.AuthorizedDatabases = opt.AuthorizedDatabases
+		}
+	}
 	op := operation.NewListDatabases(filterDoc).
 		Session(sess).ReadPreference(c.readPreference).CommandMonitor(c.monitor).
 		ServerSelector(selector).ClusterClock(c.clock).Database("admin").Deployment(c.deployment).Crypt(c.cryptFLE).
@@ -715,40 +775,51 @@ func (c *Client) ListDatabaseNames(ctx context.Context, filter interface{}, opts
 	return names, nil
 }
 
-// WithSession creates a new SessionContext from the ctx and sess parameters and uses it to call the fn callback. The
-// SessionContext must be used as the Context parameter for any operations in the fn callback that should be executed
-// under the session.
+// WithSession creates a new session context from the ctx and sess parameters
+// and uses it to call the fn callback.
 //
-// WithSession is safe to call from multiple goroutines concurrently. However, the SessionContext passed to the
-// WithSession callback function is not safe for concurrent use by multiple goroutines.
+// WithSession is safe to call from multiple goroutines concurrently. However,
+// the context passed to the WithSession callback function is not safe for
+// concurrent use by multiple goroutines.
 //
-// If the ctx parameter already contains a Session, that Session will be replaced with the one provided.
+// If the ctx parameter already contains a Session, that Session will be
+// replaced with the one provided.
 //
-// Any error returned by the fn callback will be returned without any modifications.
-func WithSession(ctx context.Context, sess Session, fn func(SessionContext) error) error {
+// Any error returned by the fn callback will be returned without any
+// modifications.
+func WithSession(ctx context.Context, sess *Session, fn func(context.Context) error) error {
 	return fn(NewSessionContext(ctx, sess))
 }
 
-// UseSession creates a new Session and uses it to create a new SessionContext, which is used to call the fn callback.
-// The SessionContext parameter must be used as the Context parameter for any operations in the fn callback that should
-// be executed under a session. After the callback returns, the created Session is ended, meaning that any in-progress
-// transactions started by fn will be aborted even if fn returns an error.
+// UseSession creates a new Session and uses it to create a new session context,
+// which is used to call the fn callback. After the callback returns, the
+// created Session is ended, meaning that any in-progress transactions started
+// by fn will be aborted even if fn returns an error.
 //
-// UseSession is safe to call from multiple goroutines concurrently. However, the SessionContext passed to the
-// UseSession callback function is not safe for concurrent use by multiple goroutines.
+// UseSession is safe to call from multiple goroutines concurrently. However,
+// the context passed to the UseSession callback function is not safe for
+// concurrent use by multiple goroutines.
 //
-// If the ctx parameter already contains a Session, that Session will be replaced with the newly created one.
+// If the ctx parameter already contains a Session, that Session will be
+// replaced with the newly created one.
 //
-// Any error returned by the fn callback will be returned without any modifications.
-func (c *Client) UseSession(ctx context.Context, fn func(SessionContext) error) error {
+// Any error returned by the fn callback will be returned without any
+// modifications.
+func (c *Client) UseSession(ctx context.Context, fn func(context.Context) error) error {
 	return c.UseSessionWithOptions(ctx, options.Session(), fn)
 }
 
-// UseSessionWithOptions operates like UseSession but uses the given SessionOptions to create the Session.
+// UseSessionWithOptions operates like UseSession but uses the given
+// SessionOptions to create the Session.
 //
-// UseSessionWithOptions is safe to call from multiple goroutines concurrently. However, the SessionContext passed to
-// the UseSessionWithOptions callback function is not safe for concurrent use by multiple goroutines.
-func (c *Client) UseSessionWithOptions(ctx context.Context, opts *options.SessionOptions, fn func(SessionContext) error) error {
+// UseSessionWithOptions is safe to call from multiple goroutines concurrently.
+// However, the context passed to the UseSessionWithOptions callback function is
+// not safe for concurrent use by multiple goroutines.
+func (c *Client) UseSessionWithOptions(
+	ctx context.Context,
+	opts *options.SessionOptions,
+	fn func(context.Context) error,
+) error {
 	defaultSess, err := c.StartSession(opts)
 	if err != nil {
 		return err
@@ -781,6 +852,7 @@ func (c *Client) Watch(ctx context.Context, pipeline interface{},
 		readConcern:    c.readConcern,
 		readPreference: c.readPreference,
 		client:         c,
+		bsonOpts:       c.bsonOpts,
 		registry:       c.registry,
 		streamType:     ClientStream,
 		crypt:          c.cryptFLE,
@@ -798,15 +870,35 @@ func (c *Client) NumberSessionsInProgress() int {
 	return int(c.sessionPool.CheckedOut())
 }
 
-// Timeout returns the timeout set for this client.
-func (c *Client) Timeout() *time.Duration {
-	return c.timeout
-}
-
 func (c *Client) createBaseCursorOptions() driver.CursorOptions {
 	return driver.CursorOptions{
 		CommandMonitor: c.monitor,
 		Crypt:          c.cryptFLE,
 		ServerAPI:      c.serverAPI,
 	}
+}
+
+// newLogger will use the LoggerOptions to create an internal logger and publish
+// messages using a LogSink.
+func newLogger(opts *options.LoggerOptions) (*logger.Logger, error) {
+	// If there are no logger options, then create a default logger.
+	if opts == nil {
+		opts = options.Logger()
+	}
+
+	// If there are no component-level options and the environment does not
+	// contain component variables, then do nothing.
+	if (opts.ComponentLevels == nil || len(opts.ComponentLevels) == 0) &&
+		!logger.EnvHasComponentVariables() {
+
+		return nil, nil
+	}
+
+	// Otherwise, collect the component-level options and create a logger.
+	componentLevels := make(map[logger.Component]logger.Level)
+	for component, level := range opts.ComponentLevels {
+		componentLevels[logger.Component(component)] = logger.Level(level)
+	}
+
+	return logger.New(opts.Sink, opts.MaxDocumentLength, componentLevels)
 }

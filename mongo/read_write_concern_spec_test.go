@@ -8,6 +8,7 @@ package mongo
 
 import (
 	"bytes"
+	"errors"
 	"io/ioutil"
 	"path"
 	"reflect"
@@ -15,8 +16,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/bsontype"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/internal/assert"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
@@ -31,8 +31,11 @@ const (
 
 var (
 	serverDefaultConcern = []byte{5, 0, 0, 0, 0} // server default read concern and write concern is empty document
-	specTestRegistry     = bson.NewRegistryBuilder().
-				RegisterTypeMapEntry(bson.TypeEmbeddedDocument, reflect.TypeOf(bson.Raw{})).Build()
+	specTestRegistry     = func() *bson.Registry {
+		reg := bson.NewRegistry()
+		reg.RegisterTypeMapEntry(bson.TypeEmbeddedDocument, reflect.TypeOf(bson.Raw{}))
+		return reg
+	}()
 )
 
 type connectionStringTestFile struct {
@@ -104,13 +107,13 @@ func runConnectionStringTest(t *testing.T, test connectionStringTest) {
 
 	if test.ReadConcern != nil {
 		expected := readConcernFromRaw(t, test.ReadConcern)
-		assert.Equal(t, expected.GetLevel(), cs.ReadConcernLevel,
-			"expected level %v, got %v", expected.GetLevel(), cs.ReadConcernLevel)
+		assert.Equal(t, expected.Level, cs.ReadConcernLevel,
+			"expected level %v, got %v", expected.Level, cs.ReadConcernLevel)
 	}
 	if test.WriteConcern != nil {
 		expectedWc := writeConcernFromRaw(t, test.WriteConcern)
 		if expectedWc.wSet {
-			expected := expectedWc.GetW()
+			expected := expectedWc.W
 			if _, ok := expected.(int); ok {
 				assert.True(t, cs.WNumberSet, "expected WNumberSet, got false")
 				assert.Equal(t, expected, cs.WNumber, "expected w value %v, got %v", expected, cs.WNumber)
@@ -121,12 +124,12 @@ func runConnectionStringTest(t *testing.T, test connectionStringTest) {
 		}
 		if expectedWc.timeoutSet {
 			assert.True(t, cs.WTimeoutSet, "expected WTimeoutSet, got false")
-			assert.Equal(t, expectedWc.GetWTimeout(), cs.WTimeout,
-				"expected timeout value %v, got %v", expectedWc.GetWTimeout(), cs.WTimeout)
+			assert.Equal(t, expectedWc.WTimeout, cs.WTimeout,
+				"expected timeout value %v, got %v", expectedWc.WTimeout, cs.WTimeout)
 		}
 		if expectedWc.jSet {
 			assert.True(t, cs.JSet, "expected JSet, got false")
-			assert.Equal(t, expectedWc.GetJ(), cs.J, "expected j value %v, got %v", expectedWc.GetJ(), cs.J)
+			assert.Equal(t, *expectedWc.Journal, cs.J, "expected j value %v, got %v", *expectedWc.Journal, cs.J)
 		}
 	}
 }
@@ -175,7 +178,7 @@ func runDocumentTest(t *testing.T, test documentTest) {
 		}
 
 		expected := *test.WriteConcernDocument
-		if err == writeconcern.ErrEmptyWriteConcern {
+		if errors.Is(err, writeconcern.ErrEmptyWriteConcern) {
 			elems, _ := expected.Elements()
 			if len(elems) == 0 {
 				assert.NotNil(t, test.IsServerDefault, "expected write concern %s, got empty", expected)
@@ -200,7 +203,7 @@ func runDocumentTest(t *testing.T, test documentTest) {
 func readConcernFromRaw(t *testing.T, rc bson.Raw) *readconcern.ReadConcern {
 	t.Helper()
 
-	var opts []readconcern.Option
+	concern := &readconcern.ReadConcern{}
 	elems, _ := rc.Elements()
 	for _, elem := range elems {
 		key := elem.Key()
@@ -208,12 +211,12 @@ func readConcernFromRaw(t *testing.T, rc bson.Raw) *readconcern.ReadConcern {
 
 		switch key {
 		case "level":
-			opts = append(opts, readconcern.Level(val.StringValue()))
+			concern.Level = val.StringValue()
 		default:
 			t.Fatalf("unrecognized read concern field %v", key)
 		}
 	}
-	return readconcern.New(opts...)
+	return concern
 }
 
 type writeConcern struct {
@@ -225,7 +228,7 @@ type writeConcern struct {
 
 func writeConcernFromRaw(t *testing.T, wcRaw bson.Raw) writeConcern {
 	var wc writeConcern
-	var opts []writeconcern.Option
+	wc.WriteConcern = &writeconcern.WriteConcern{}
 
 	elems, _ := wcRaw.Elements()
 	for _, elem := range elems {
@@ -236,28 +239,26 @@ func writeConcernFromRaw(t *testing.T, wcRaw bson.Raw) writeConcern {
 		case "w":
 			wc.wSet = true
 			switch val.Type {
-			case bsontype.Int32:
+			case bson.TypeInt32:
 				w := int(val.Int32())
-				opts = append(opts, writeconcern.W(w))
-			case bsontype.String:
-				opts = append(opts, writeconcern.WTagSet(val.StringValue()))
+				wc.WriteConcern.W = w
+			case bson.TypeString:
+				wc.WriteConcern.W = val.StringValue()
 			default:
 				t.Fatalf("unexpected type for w: %v", val.Type)
 			}
 		case "wtimeoutMS":
 			wc.timeoutSet = true
 			timeout := time.Duration(val.Int32()) * time.Millisecond
-			opts = append(opts, writeconcern.WTimeout(timeout))
+			wc.WriteConcern.WTimeout = timeout
 		case "journal":
 			wc.jSet = true
 			j := val.Boolean()
-			opts = append(opts, writeconcern.J(j))
+			wc.WriteConcern.Journal = &j
 		default:
 			t.Fatalf("unrecognized write concern field: %v", key)
 		}
 	}
-
-	wc.WriteConcern = writeconcern.New(opts...)
 	return wc
 }
 

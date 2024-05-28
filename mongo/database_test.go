@@ -10,14 +10,15 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/bsoncodec"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/internal/assert"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+	"go.mongodb.org/mongo-driver/x/mongo/driver/topology"
 )
 
 func setupDb(name string, opts ...*options.DatabaseOptions) *Database {
@@ -48,11 +49,11 @@ func TestDatabase(t *testing.T) {
 		t.Run("custom", func(t *testing.T) {
 			rpPrimary := readpref.Primary()
 			rpSecondary := readpref.Secondary()
-			wc1 := writeconcern.New(writeconcern.W(5))
-			wc2 := writeconcern.New(writeconcern.W(10))
+			wc1 := &writeconcern.WriteConcern{W: 5}
+			wc2 := &writeconcern.WriteConcern{W: 10}
 			rcLocal := readconcern.Local()
 			rcMajority := readconcern.Majority()
-			reg := bsoncodec.NewRegistryBuilder().Build()
+			reg := bson.NewRegistry()
 
 			opts := options.Database().SetReadPreference(rpPrimary).SetReadConcern(rcLocal).SetWriteConcern(wc1).
 				SetReadPreference(rpSecondary).SetReadConcern(rcMajority).SetWriteConcern(wc2).SetRegistry(reg)
@@ -68,8 +69,8 @@ func TestDatabase(t *testing.T) {
 		t.Run("inherit", func(t *testing.T) {
 			rpPrimary := readpref.Primary()
 			rcLocal := readconcern.Local()
-			wc1 := writeconcern.New(writeconcern.W(10))
-			reg := bsoncodec.NewRegistryBuilder().Build()
+			wc1 := &writeconcern.WriteConcern{W: 10}
+			reg := bson.NewRegistry()
 
 			client := setupClient(options.Client().SetReadPreference(rpPrimary).SetReadConcern(rcLocal).SetRegistry(reg))
 			got := client.Database("foo", options.Database().SetWriteConcern(wc1))
@@ -84,7 +85,6 @@ func TestDatabase(t *testing.T) {
 	})
 	t.Run("replace topology error", func(t *testing.T) {
 		db := setupDb("foo")
-
 		err := db.RunCommand(bgCtx, bson.D{{"x", 1}}).Err()
 		assert.Equal(t, ErrClientDisconnected, err, "expected error %v, got %v", ErrClientDisconnected, err)
 
@@ -94,6 +94,43 @@ func TestDatabase(t *testing.T) {
 		_, err = db.ListCollections(bgCtx, bson.D{})
 		assert.Equal(t, ErrClientDisconnected, err, "expected error %v, got %v", ErrClientDisconnected, err)
 	})
+	t.Run("TransientTransactionError label", func(t *testing.T) {
+		client := setupClient(options.Client().ApplyURI("mongodb://nonexistent").SetServerSelectionTimeout(3 * time.Second))
+		err := client.connect()
+		defer func() { _ = client.Disconnect(bgCtx) }()
+		assert.Nil(t, err, "expected nil, got %v", err)
+
+		t.Run("negative case of non-transaction", func(t *testing.T) {
+			var sse topology.ServerSelectionError
+			var le LabeledError
+
+			err := client.Ping(bgCtx, nil)
+			assert.NotNil(t, err, "expected error, got nil")
+			assert.True(t, errors.As(err, &sse), `expected error to be a "topology.ServerSelectionError"`)
+			if errors.As(err, &le) {
+				assert.False(t, le.HasErrorLabel("TransientTransactionError"), `expected error not to include the "TransientTransactionError" label`)
+			}
+		})
+
+		t.Run("positive case of transaction", func(t *testing.T) {
+			var sse topology.ServerSelectionError
+			var le LabeledError
+
+			sess, err := client.StartSession()
+			assert.Nil(t, err, "expected nil, got %v", err)
+			defer sess.EndSession(bgCtx)
+
+			sessCtx := NewSessionContext(bgCtx, sess)
+			err = sess.StartTransaction()
+			assert.Nil(t, err, "expected nil, got %v", err)
+
+			err = client.Ping(sessCtx, nil)
+			assert.NotNil(t, err, "expected error, got nil")
+			assert.True(t, errors.As(err, &sse), `expected error to be a "topology.ServerSelectionError"`)
+			assert.True(t, errors.As(err, &le), `expected error to implement the "LabeledError" interface`)
+			assert.True(t, le.HasErrorLabel("TransientTransactionError"), `expected error to include the "TransientTransactionError" label`)
+		})
+	})
 	t.Run("nil document error", func(t *testing.T) {
 		db := setupDb("foo")
 
@@ -101,7 +138,7 @@ func TestDatabase(t *testing.T) {
 		assert.Equal(t, ErrNilDocument, err, "expected error %v, got %v", ErrNilDocument, err)
 
 		_, err = db.Watch(context.Background(), nil)
-		watchErr := errors.New("can only transform slices and arrays into aggregation pipelines, but got invalid")
+		watchErr := errors.New("can only marshal slices and arrays into aggregation pipelines, but got invalid")
 		assert.Equal(t, watchErr, err, "expected error %v, got %v", watchErr, err)
 
 		_, err = db.ListCollections(context.Background(), nil)

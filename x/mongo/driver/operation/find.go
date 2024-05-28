@@ -11,8 +11,9 @@ import (
 	"errors"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson/bsontype"
 	"go.mongodb.org/mongo-driver/event"
+	"go.mongodb.org/mongo-driver/internal/driverutil"
+	"go.mongodb.org/mongo-driver/internal/logger"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
@@ -28,7 +29,7 @@ type Find struct {
 	awaitData           *bool
 	batchSize           *int32
 	collation           bsoncore.Document
-	comment             *string
+	comment             bsoncore.Value
 	filter              bsoncore.Document
 	hint                bsoncore.Value
 	let                 bsoncore.Document
@@ -60,6 +61,7 @@ type Find struct {
 	result              driver.CursorResponse
 	serverAPI           *driver.ServerAPIOptions
 	timeout             *time.Duration
+	logger              *logger.Logger
 }
 
 // NewFind constructs and returns a new Find.
@@ -105,8 +107,9 @@ func (f *Find) Execute(ctx context.Context) error {
 		Legacy:            driver.LegacyFind,
 		ServerAPI:         f.serverAPI,
 		Timeout:           f.timeout,
+		Logger:            f.logger,
+		Name:              driverutil.FindOp,
 	}.Execute(ctx)
-
 }
 
 func (f *Find) command(dst []byte, desc description.SelectedServer) ([]byte, error) {
@@ -132,13 +135,13 @@ func (f *Find) command(dst []byte, desc description.SelectedServer) ([]byte, err
 		}
 		dst = bsoncore.AppendDocumentElement(dst, "collation", f.collation)
 	}
-	if f.comment != nil {
-		dst = bsoncore.AppendStringElement(dst, "comment", *f.comment)
+	if f.comment.Type != bsoncore.Type(0) {
+		dst = bsoncore.AppendValueElement(dst, "comment", f.comment)
 	}
 	if f.filter != nil {
 		dst = bsoncore.AppendDocumentElement(dst, "filter", f.filter)
 	}
-	if f.hint.Type != bsontype.Type(0) {
+	if f.hint.Type != bsoncore.Type(0) {
 		dst = bsoncore.AppendValueElement(dst, "hint", f.hint)
 	}
 	if f.let != nil {
@@ -236,13 +239,13 @@ func (f *Find) Collation(collation bsoncore.Document) *Find {
 	return f
 }
 
-// Comment sets a string to help trace an operation.
-func (f *Find) Comment(comment string) *Find {
+// Comment sets a value to help trace an operation.
+func (f *Find) Comment(comment bsoncore.Value) *Find {
 	if f == nil {
 		f = new(Find)
 	}
 
-	f.comment = &comment
+	f.comment = comment
 	return f
 }
 
@@ -544,5 +547,15 @@ func (f *Find) Timeout(timeout *time.Duration) *Find {
 	}
 
 	f.timeout = timeout
+	return f
+}
+
+// Logger sets the logger for this operation.
+func (f *Find) Logger(logger *logger.Logger) *Find {
+	if f == nil {
+		f = new(Find)
+	}
+
+	f.logger = logger
 	return f
 }

@@ -9,6 +9,7 @@ package topology
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"net"
 	"path"
@@ -18,11 +19,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/event"
-	"go.mongodb.org/mongo-driver/internal/testutil/helpers"
-	"go.mongodb.org/mongo-driver/mongo/address"
+	"go.mongodb.org/mongo-driver/internal/require"
+	"go.mongodb.org/mongo-driver/internal/spectest"
+	"go.mongodb.org/mongo-driver/x/mongo/driver/mnet"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/operation"
 )
 
@@ -64,7 +65,7 @@ var skippedTestDescriptions = map[string]string{
 type cmapEvent struct {
 	EventType    string      `json:"type"`
 	Address      interface{} `json:"address"`
-	ConnectionID uint64      `json:"connectionId"`
+	ConnectionID int64       `json:"connectionId"`
 	Options      interface{} `json:"options"`
 	Reason       string      `json:"reason"`
 }
@@ -116,7 +117,7 @@ type testInfo struct {
 const cmapTestDir = "../../../../testdata/connection-monitoring-and-pooling/"
 
 func TestCMAPSpec(t *testing.T) {
-	for _, testFileName := range helpers.FindJSONFilesInDir(t, cmapTestDir) {
+	for _, testFileName := range spectest.FindJSONFilesInDir(t, cmapTestDir) {
 		t.Run(testFileName, func(t *testing.T) {
 			runCMAPTest(t, testFileName)
 		})
@@ -137,9 +138,6 @@ func runCMAPTest(t *testing.T, testFileName string) {
 	if msg, ok := skippedTestDescriptions[test.Description]; ok {
 		t.Skip(msg)
 	}
-
-	l, err := net.Listen("tcp", "localhost:0")
-	require.NoError(t, err, "unable to create listener")
 
 	testInfo := &testInfo{
 		objects:                make(map[string]interface{}),
@@ -173,43 +171,44 @@ func runCMAPTest(t *testing.T, testFileName string) {
 		}),
 	}
 
-	// If there's a failpoint configured in the test, use a dialer that returns connections that
-	// mock the configured failpoint. If "blockConnection" is true and "blockTimeMS" is specified,
-	// use a mock connection that delays reads by the configured amount. If "closeConnection" is
-	// true, close the connection so it always returns an error on read and write.
+	var delay time.Duration
+	var closeConnection bool
+
 	if test.FailPoint != nil {
 		data, ok := test.FailPoint["data"].(map[string]interface{})
 		if !ok {
 			t.Fatalf("expected to find \"data\" map in failPoint (%v)", test.FailPoint)
 		}
 
-		var delay time.Duration
 		blockConnection, _ := data["blockConnection"].(bool)
 		if blockTimeMS, ok := data["blockTimeMS"].(float64); ok && blockConnection {
 			delay = time.Duration(blockTimeMS) * time.Millisecond
 		}
 
-		closeConnection, _ := data["closeConnection"].(bool)
-
-		sOpts = append(sOpts, WithConnectionOptions(func(...ConnectionOption) []ConnectionOption {
-			return []ConnectionOption{
-				WithDialer(func(Dialer) Dialer {
-					return DialerFunc(func(_ context.Context, _, _ string) (net.Conn, error) {
-						msc := newMockSlowConn(makeHelloReply(), delay)
-						if closeConnection {
-							msc.Close()
-						}
-						return msc, nil
-					})
-				}),
-				WithHandshaker(func(h Handshaker) Handshaker {
-					return operation.NewHello()
-				}),
-			}
-		}))
+		closeConnection, _ = data["closeConnection"].(bool)
 	}
 
-	s := NewServer(address.Address(l.Addr().String()), primitive.NewObjectID(), sOpts...)
+	// Use a dialer that returns mock connections that always respond with a
+	// "hello" reply. If there's a failpoint configured in the test, use a
+	// dialer that returns connections that mock the configured failpoint.
+	sOpts = append(sOpts, WithConnectionOptions(func(...ConnectionOption) []ConnectionOption {
+		return []ConnectionOption{
+			WithDialer(func(Dialer) Dialer {
+				return DialerFunc(func(_ context.Context, _, _ string) (net.Conn, error) {
+					msc := newMockSlowConn(makeHelloReply(), delay)
+					if closeConnection {
+						msc.Close()
+					}
+					return msc, nil
+				})
+			}),
+			WithHandshaker(func(h Handshaker) Handshaker {
+				return operation.NewHello()
+			}),
+		}
+	}))
+
+	s := NewServer("mongodb://fake", bson.NewObjectID(), sOpts...)
 	s.state = serverConnected
 	require.NoError(t, err, "error connecting connection pool")
 	defer s.pool.close(context.Background())
@@ -519,13 +518,18 @@ func runOperationInThread(t *testing.T, operation map[string]interface{}, testIn
 			t.Fatalf("was unable to find %v in objects when expected", cName)
 		}
 
-		c, ok := cEmptyInterface.(*Connection)
+		c, ok := cEmptyInterface.(*mnet.Connection)
 		if !ok {
 			t.Fatalf("object in objects was expected to be a connection, but was instead a %T", cEmptyInterface)
 		}
 		return c.Close()
 	case "clear":
-		s.pool.clear(nil, nil)
+		needInterruption, ok := operation["interruptInUseConnections"].(bool)
+		if ok && needInterruption {
+			s.pool.clearAll(fmt.Errorf("spec test clear"), nil)
+		} else {
+			s.pool.clear(fmt.Errorf("spec test clear"), nil)
+		}
 	case "close":
 		s.pool.close(context.Background())
 	case "ready":

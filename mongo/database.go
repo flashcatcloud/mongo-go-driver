@@ -10,10 +10,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/bsoncodec"
-	"go.mongodb.org/mongo-driver/internal"
+	"go.mongodb.org/mongo-driver/internal/csfle"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
@@ -38,11 +38,29 @@ type Database struct {
 	readPreference *readpref.ReadPref
 	readSelector   description.ServerSelector
 	writeSelector  description.ServerSelector
-	registry       *bsoncodec.Registry
+	bsonOpts       *options.BSONOptions
+	registry       *bson.Registry
 }
 
 func newDatabase(client *Client, name string, opts ...*options.DatabaseOptions) *Database {
-	dbOpt := options.MergeDatabaseOptions(opts...)
+	dbOpt := options.Database()
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if opt.ReadConcern != nil {
+			dbOpt.ReadConcern = opt.ReadConcern
+		}
+		if opt.WriteConcern != nil {
+			dbOpt.WriteConcern = opt.WriteConcern
+		}
+		if opt.ReadPreference != nil {
+			dbOpt.ReadPreference = opt.ReadPreference
+		}
+		if opt.Registry != nil {
+			dbOpt.Registry = opt.Registry
+		}
+	}
 
 	rc := client.readConcern
 	if dbOpt.ReadConcern != nil {
@@ -59,6 +77,11 @@ func newDatabase(client *Client, name string, opts ...*options.DatabaseOptions) 
 		wc = dbOpt.WriteConcern
 	}
 
+	bsonOpts := client.bsonOpts
+	if dbOpt.BSONOptions != nil {
+		bsonOpts = dbOpt.BSONOptions
+	}
+
 	reg := client.registry
 	if dbOpt.Registry != nil {
 		reg = dbOpt.Registry
@@ -70,6 +93,7 @@ func newDatabase(client *Client, name string, opts ...*options.DatabaseOptions) 
 		readPreference: rp,
 		readConcern:    rc,
 		writeConcern:   wc,
+		bsonOpts:       bsonOpts,
 		registry:       reg,
 	}
 
@@ -136,11 +160,7 @@ func (db *Database) processRunCommand(ctx context.Context, cmd interface{},
 	cursorCommand bool, opts ...*options.RunCmdOptions) (*operation.Command, *session.Client, error) {
 	sess := sessionFromContext(ctx)
 	if sess == nil && db.client.sessionPool != nil {
-		var err error
-		sess, err = session.NewClientSession(db.client.sessionPool, db.client.id, session.Implicit)
-		if err != nil {
-			return nil, sess, err
-		}
+		sess = session.NewImplicitClientSession(db.client.sessionPool, db.client.id)
 	}
 
 	err := db.client.validSession(sess)
@@ -148,12 +168,24 @@ func (db *Database) processRunCommand(ctx context.Context, cmd interface{},
 		return nil, sess, err
 	}
 
-	ro := options.MergeRunCmdOptions(append(defaultRunCmdOpts, opts...)...)
+	ro := options.RunCmd()
+	for _, opt := range append(defaultRunCmdOpts, opts...) {
+		if opt == nil {
+			continue
+		}
+		if opt.ReadPreference != nil {
+			ro.ReadPreference = opt.ReadPreference
+		}
+	}
 	if sess != nil && sess.TransactionRunning() && ro.ReadPreference != nil && ro.ReadPreference.Mode() != readpref.PrimaryMode {
 		return nil, sess, errors.New("read preference in a transaction must be primary")
 	}
 
-	runCmdDoc, err := transformBsoncoreDocument(db.registry, cmd, false, "cmd")
+	if isUnorderedMap(cmd) {
+		return nil, sess, ErrMapForOrderedArgument{"cmd"}
+	}
+
+	runCmdDoc, err := marshal(cmd, db.bsonOpts, db.registry)
 	if err != nil {
 		return nil, sess, err
 	}
@@ -169,19 +201,29 @@ func (db *Database) processRunCommand(ctx context.Context, cmd interface{},
 	switch cursorCommand {
 	case true:
 		cursorOpts := db.client.createBaseCursorOptions()
+
+		cursorOpts.MarshalValueEncoderFn = newEncoderFn(db.bsonOpts, db.registry)
+
 		op = operation.NewCursorCommand(runCmdDoc, cursorOpts)
 	default:
 		op = operation.NewCommand(runCmdDoc)
 	}
+
 	return op.Session(sess).CommandMonitor(db.client.monitor).
 		ServerSelector(readSelect).ClusterClock(db.client.clock).
-		Database(db.name).Deployment(db.client.deployment).ReadConcern(db.readConcern).
+		Database(db.name).Deployment(db.client.deployment).
 		Crypt(db.client.cryptFLE).ReadPreference(ro.ReadPreference).ServerAPI(db.client.serverAPI).
-		Timeout(db.client.timeout), sess, nil
+		Timeout(db.client.timeout).Logger(db.client.logger), sess, nil
 }
 
-// RunCommand executes the given command against the database. This function does not obey the Database's read
-// preference. To specify a read preference, the RunCmdOptions.ReadPreference option must be used.
+// RunCommand executes the given command against the database.
+//
+// This function does not obey the Database's readPreference. To specify a read
+// preference, the RunCmdOptions.ReadPreference option must be used.
+//
+// This function does not obey the Database's readConcern or writeConcern. A
+// user must supply these values manually in the user-provided runCommand
+// parameter.
 //
 // The runCommand parameter must be a document for the command to be executed. It cannot be nil.
 // This must be an order-preserving type such as bson.D. Map types such as bson.M are not valid.
@@ -207,9 +249,11 @@ func (db *Database) RunCommand(ctx context.Context, runCommand interface{}, opts
 	// RunCommand can be used to run a write, thus execute may return a write error
 	_, convErr := processWriteError(err)
 	return &SingleResult{
-		err: convErr,
-		rdr: bson.Raw(op.Result()),
-		reg: db.registry,
+		ctx:      ctx,
+		err:      convErr,
+		rdr:      bson.Raw(op.Result()),
+		bsonOpts: db.bsonOpts,
+		reg:      db.registry,
 	}
 }
 
@@ -240,6 +284,10 @@ func (db *Database) RunCommandCursor(ctx context.Context, runCommand interface{}
 
 	if err = op.Execute(ctx); err != nil {
 		closeImplicitSession(sess)
+		if errors.Is(err, driver.ErrNoCursor) {
+			return nil, errors.New(
+				"database response does not contain a cursor; try using RunCommand instead")
+		}
 		return nil, replaceErrors(err)
 	}
 
@@ -248,7 +296,7 @@ func (db *Database) RunCommandCursor(ctx context.Context, runCommand interface{}
 		closeImplicitSession(sess)
 		return nil, replaceErrors(err)
 	}
-	cursor, err := newCursorWithSession(bc, db.registry, sess)
+	cursor, err := newCursorWithSession(bc, db.bsonOpts, db.registry, sess)
 	return cursor, replaceErrors(err)
 }
 
@@ -261,11 +309,7 @@ func (db *Database) Drop(ctx context.Context) error {
 
 	sess := sessionFromContext(ctx)
 	if sess == nil && db.client.sessionPool != nil {
-		var err error
-		sess, err = session.NewClientSession(db.client.sessionPool, db.client.id, session.Implicit)
-		if err != nil {
-			return err
-		}
+		sess = session.NewImplicitClientSession(db.client.sessionPool, db.client.id)
 		defer sess.EndSession()
 	}
 
@@ -278,7 +322,7 @@ func (db *Database) Drop(ctx context.Context) error {
 	if sess.TransactionRunning() {
 		wc = nil
 	}
-	if !writeconcern.AckWrite(wc) {
+	if !wc.Acknowledged() {
 		sess = nil
 	}
 
@@ -310,9 +354,6 @@ func (db *Database) Drop(ctx context.Context) error {
 // documentation).
 //
 // For more information about the command, see https://www.mongodb.com/docs/manual/reference/command/listCollections/.
-//
-// BUG(benjirewis): ListCollectionSpecifications prevents listing more than 100 collections per database when running
-// against MongoDB version 2.6.
 func (db *Database) ListCollectionSpecifications(ctx context.Context, filter interface{},
 	opts ...*options.ListCollectionsOptions) ([]*CollectionSpecification, error) {
 
@@ -321,19 +362,43 @@ func (db *Database) ListCollectionSpecifications(ctx context.Context, filter int
 		return nil, err
 	}
 
-	var specs []*CollectionSpecification
-	err = cursor.All(ctx, &specs)
+	var resp []struct {
+		Name string `bson:"name"`
+		Type string `bson:"type"`
+		Info *struct {
+			ReadOnly bool         `bson:"readOnly"`
+			UUID     *bson.Binary `bson:"uuid"`
+		} `bson:"info"`
+		Options bson.Raw                       `bson:"options"`
+		IDIndex indexListSpecificationResponse `bson:"idIndex"`
+	}
+
+	err = cursor.All(ctx, &resp)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, spec := range specs {
+	specs := make([]*CollectionSpecification, len(resp))
+	for idx, spec := range resp {
+		specs[idx] = &CollectionSpecification{
+			Name:    spec.Name,
+			Type:    spec.Type,
+			Options: spec.Options,
+			IDIndex: newIndexSpecificationFromResponse(spec.IDIndex),
+		}
+
+		if spec.Info != nil {
+			specs[idx].ReadOnly = spec.Info.ReadOnly
+			specs[idx].UUID = spec.Info.UUID
+		}
+
 		// Pre-4.4 servers report a namespace in their responses, so we only set Namespace manually if it was not in
 		// the response.
-		if spec.IDIndex != nil && spec.IDIndex.Namespace == "" {
-			spec.IDIndex.Namespace = db.name + "." + spec.Name
+		if specs[idx].IDIndex != nil && specs[idx].IDIndex.Namespace == "" {
+			specs[idx].IDIndex.Namespace = db.name + "." + specs[idx].Name
 		}
 	}
+
 	return specs, nil
 }
 
@@ -355,17 +420,14 @@ func (db *Database) ListCollections(ctx context.Context, filter interface{}, opt
 		ctx = context.Background()
 	}
 
-	filterDoc, err := transformBsoncoreDocument(db.registry, filter, true, "filter")
+	filterDoc, err := marshal(filter, db.bsonOpts, db.registry)
 	if err != nil {
 		return nil, err
 	}
 
 	sess := sessionFromContext(ctx)
 	if sess == nil && db.client.sessionPool != nil {
-		sess, err = session.NewClientSession(db.client.sessionPool, db.client.id, session.Implicit)
-		if err != nil {
-			return nil, err
-		}
+		sess = session.NewImplicitClientSession(db.client.sessionPool, db.client.id)
 	}
 
 	err = db.client.validSession(sess)
@@ -380,7 +442,21 @@ func (db *Database) ListCollections(ctx context.Context, filter interface{}, opt
 	})
 	selector = makeReadPrefSelector(sess, selector, db.client.localThreshold)
 
-	lco := options.MergeListCollectionsOptions(opts...)
+	lco := options.ListCollections()
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if opt.NameOnly != nil {
+			lco.NameOnly = opt.NameOnly
+		}
+		if opt.BatchSize != nil {
+			lco.BatchSize = opt.BatchSize
+		}
+		if opt.AuthorizedCollections != nil {
+			lco.AuthorizedCollections = opt.AuthorizedCollections
+		}
+	}
 	op := operation.NewListCollections(filterDoc).
 		Session(sess).ReadPreference(db.readPreference).CommandMonitor(db.client.monitor).
 		ServerSelector(selector).ClusterClock(db.client.clock).
@@ -388,6 +464,9 @@ func (db *Database) ListCollections(ctx context.Context, filter interface{}, opt
 		ServerAPI(db.client.serverAPI).Timeout(db.client.timeout)
 
 	cursorOpts := db.client.createBaseCursorOptions()
+
+	cursorOpts.MarshalValueEncoderFn = newEncoderFn(db.bsonOpts, db.registry)
+
 	if lco.NameOnly != nil {
 		op = op.NameOnly(*lco.NameOnly)
 	}
@@ -416,7 +495,7 @@ func (db *Database) ListCollections(ctx context.Context, filter interface{}, opt
 		closeImplicitSession(sess)
 		return nil, replaceErrors(err)
 	}
-	cursor, err := newCursorWithSession(bc, db.registry, sess)
+	cursor, err := newCursorWithSession(bc, db.bsonOpts, db.registry, sess)
 	return cursor, replaceErrors(err)
 }
 
@@ -463,21 +542,6 @@ func (db *Database) ListCollectionNames(ctx context.Context, filter interface{},
 	return names, nil
 }
 
-// ReadConcern returns the read concern used to configure the Database object.
-func (db *Database) ReadConcern() *readconcern.ReadConcern {
-	return db.readConcern
-}
-
-// ReadPreference returns the read preference used to configure the Database object.
-func (db *Database) ReadPreference() *readpref.ReadPref {
-	return db.readPreference
-}
-
-// WriteConcern returns the write concern used to configure the Database object.
-func (db *Database) WriteConcern() *writeconcern.WriteConcern {
-	return db.writeConcern
-}
-
 // Watch returns a change stream for all changes to the corresponding database. See
 // https://www.mongodb.com/docs/manual/changeStreams/ for more information about change streams.
 //
@@ -506,6 +570,63 @@ func (db *Database) Watch(ctx context.Context, pipeline interface{},
 	return newChangeStream(ctx, csConfig, pipeline, opts...)
 }
 
+// mergeCreateCollectionOptions combines the given CreateCollectionOptions instances into a single
+// CreateCollectionOptions in a last-property-wins fashion.
+func mergeCreateCollectionOptions(opts ...*options.CreateCollectionOptions) *options.CreateCollectionOptions {
+	cc := options.CreateCollection()
+
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+
+		if opt.Capped != nil {
+			cc.Capped = opt.Capped
+		}
+		if opt.Collation != nil {
+			cc.Collation = opt.Collation
+		}
+		if opt.ChangeStreamPreAndPostImages != nil {
+			cc.ChangeStreamPreAndPostImages = opt.ChangeStreamPreAndPostImages
+		}
+		if opt.DefaultIndexOptions != nil {
+			cc.DefaultIndexOptions = opt.DefaultIndexOptions
+		}
+		if opt.MaxDocuments != nil {
+			cc.MaxDocuments = opt.MaxDocuments
+		}
+		if opt.SizeInBytes != nil {
+			cc.SizeInBytes = opt.SizeInBytes
+		}
+		if opt.StorageEngine != nil {
+			cc.StorageEngine = opt.StorageEngine
+		}
+		if opt.ValidationAction != nil {
+			cc.ValidationAction = opt.ValidationAction
+		}
+		if opt.ValidationLevel != nil {
+			cc.ValidationLevel = opt.ValidationLevel
+		}
+		if opt.Validator != nil {
+			cc.Validator = opt.Validator
+		}
+		if opt.ExpireAfterSeconds != nil {
+			cc.ExpireAfterSeconds = opt.ExpireAfterSeconds
+		}
+		if opt.TimeSeriesOptions != nil {
+			cc.TimeSeriesOptions = opt.TimeSeriesOptions
+		}
+		if opt.EncryptedFields != nil {
+			cc.EncryptedFields = opt.EncryptedFields
+		}
+		if opt.ClusteredIndex != nil {
+			cc.ClusteredIndex = opt.ClusteredIndex
+		}
+	}
+
+	return cc
+}
+
 // CreateCollection executes a create command to explicitly create a new collection with the specified name on the
 // server. If the collection being created already exists, this method will return a mongo.CommandError. This method
 // requires driver version 1.4.0 or higher.
@@ -515,7 +636,7 @@ func (db *Database) Watch(ctx context.Context, pipeline interface{},
 //
 // For more information about the command, see https://www.mongodb.com/docs/manual/reference/command/create/.
 func (db *Database) CreateCollection(ctx context.Context, name string, opts ...*options.CreateCollectionOptions) error {
-	cco := options.MergeCreateCollectionOptions(opts...)
+	cco := mergeCreateCollectionOptions(opts...)
 	// Follow Client-Side Encryption specification to check for encryptedFields.
 	// Check for encryptedFields from create options.
 	ef := cco.EncryptedFields
@@ -546,7 +667,7 @@ func (db *Database) getEncryptedFieldsFromServer(ctx context.Context, collection
 	}
 	collSpec := collSpecs[0]
 	rawValue, err := collSpec.Options.LookupErr("encryptedFields")
-	if err == bsoncore.ErrElementNotFound {
+	if errors.Is(err, bsoncore.ErrElementNotFound) {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
@@ -560,7 +681,7 @@ func (db *Database) getEncryptedFieldsFromServer(ctx context.Context, collection
 	return encryptedFields, nil
 }
 
-// getEncryptedFieldsFromServer tries to get an "encryptedFields" document associated with collectionName by checking the client EncryptedFieldsMap.
+// getEncryptedFieldsFromMap tries to get an "encryptedFields" document associated with collectionName by checking the client EncryptedFieldsMap.
 // Returns nil and no error if an EncryptedFieldsMap is not configured, or does not contain an entry for collectionName.
 func (db *Database) getEncryptedFieldsFromMap(collectionName string) interface{} {
 	// Check the EncryptedFieldsMap
@@ -580,17 +701,37 @@ func (db *Database) getEncryptedFieldsFromMap(collectionName string) interface{}
 
 // createCollectionWithEncryptedFields creates a collection with an EncryptedFields.
 func (db *Database) createCollectionWithEncryptedFields(ctx context.Context, name string, ef interface{}, opts ...*options.CreateCollectionOptions) error {
-	efBSON, err := transformBsoncoreDocument(db.registry, ef, true /* mapAllowed */, "encryptedFields")
+	efBSON, err := marshal(ef, db.bsonOpts, db.registry)
 	if err != nil {
-		return fmt.Errorf("error transforming document: %v", err)
+		return fmt.Errorf("error transforming document: %w", err)
 	}
 
-	// Create the three encryption-related, associated collections: `escCollection`, `eccCollection` and `ecocCollection`.
+	// Check the wire version to ensure server is 7.0.0 or newer.
+	// After the wire version check, and before creating the collections, it is possible the server state changes.
+	// That is OK. This wire version check is a best effort to inform users earlier if using a QEv2 driver with a QEv1 server.
+	{
+		const QEv2WireVersion = 21
+		server, err := db.client.deployment.SelectServer(ctx, description.WriteSelector())
+		if err != nil {
+			return fmt.Errorf("error selecting server to check maxWireVersion: %w", err)
+		}
+		conn, err := server.Connection(ctx)
+		if err != nil {
+			return fmt.Errorf("error getting connection to check maxWireVersion: %w", err)
+		}
+		defer conn.Close()
+		wireVersionRange := conn.Description().WireVersion
+		if wireVersionRange.Max < QEv2WireVersion {
+			return fmt.Errorf("Driver support of Queryable Encryption is incompatible with server. Upgrade server to use Queryable Encryption. Got maxWireVersion %v but need maxWireVersion >= %v", wireVersionRange.Max, QEv2WireVersion)
+		}
+	}
+
+	// Create the two encryption-related, associated collections: `escCollection` and `ecocCollection`.
 
 	stateCollectionOpts := options.CreateCollection().
 		SetClusteredIndex(bson.D{{"key", bson.D{{"_id", 1}}}, {"unique", true}})
 	// Create ESCCollection.
-	escCollection, err := internal.GetEncryptedStateCollectionName(efBSON, name, internal.EncryptedStateCollection)
+	escCollection, err := csfle.GetEncryptedStateCollectionName(efBSON, name, csfle.EncryptedStateCollection)
 	if err != nil {
 		return err
 	}
@@ -599,18 +740,8 @@ func (db *Database) createCollectionWithEncryptedFields(ctx context.Context, nam
 		return err
 	}
 
-	// Create ECCCollection.
-	eccCollection, err := internal.GetEncryptedStateCollectionName(efBSON, name, internal.EncryptedCacheCollection)
-	if err != nil {
-		return err
-	}
-
-	if err := db.createCollection(ctx, eccCollection, stateCollectionOpts); err != nil {
-		return err
-	}
-
 	// Create ECOCCollection.
-	ecocCollection, err := internal.GetEncryptedStateCollectionName(efBSON, name, internal.EncryptedCompactionCollection)
+	ecocCollection, err := csfle.GetEncryptedStateCollectionName(efBSON, name, csfle.EncryptedCompactionCollection)
 	if err != nil {
 		return err
 	}
@@ -632,7 +763,7 @@ func (db *Database) createCollectionWithEncryptedFields(ctx context.Context, nam
 
 	// Create an index on the __safeContent__ field in the collection @collectionName.
 	if _, err := db.Collection(name).Indexes().CreateOne(ctx, IndexModel{Keys: bson.D{{"__safeContent__", 1}}}); err != nil {
-		return fmt.Errorf("error creating safeContent index: %v", err)
+		return fmt.Errorf("error creating safeContent index: %w", err)
 	}
 
 	return nil
@@ -648,7 +779,7 @@ func (db *Database) createCollection(ctx context.Context, name string, opts ...*
 }
 
 func (db *Database) createCollectionOperation(name string, opts ...*options.CreateCollectionOptions) (*operation.Create, error) {
-	cco := options.MergeCreateCollectionOptions(opts...)
+	cco := mergeCreateCollectionOptions(opts...)
 	op := operation.NewCreate(name).ServerAPI(db.client.serverAPI)
 
 	if cco.Capped != nil {
@@ -658,7 +789,7 @@ func (db *Database) createCollectionOperation(name string, opts ...*options.Crea
 		op.Collation(bsoncore.Document(cco.Collation.ToDocument()))
 	}
 	if cco.ChangeStreamPreAndPostImages != nil {
-		csppi, err := transformBsoncoreDocument(db.registry, cco.ChangeStreamPreAndPostImages, true, "changeStreamPreAndPostImages")
+		csppi, err := marshal(cco.ChangeStreamPreAndPostImages, db.bsonOpts, db.registry)
 		if err != nil {
 			return nil, err
 		}
@@ -667,7 +798,7 @@ func (db *Database) createCollectionOperation(name string, opts ...*options.Crea
 	if cco.DefaultIndexOptions != nil {
 		idx, doc := bsoncore.AppendDocumentStart(nil)
 		if cco.DefaultIndexOptions.StorageEngine != nil {
-			storageEngine, err := transformBsoncoreDocument(db.registry, cco.DefaultIndexOptions.StorageEngine, true, "storageEngine")
+			storageEngine, err := marshal(cco.DefaultIndexOptions.StorageEngine, db.bsonOpts, db.registry)
 			if err != nil {
 				return nil, err
 			}
@@ -688,7 +819,7 @@ func (db *Database) createCollectionOperation(name string, opts ...*options.Crea
 		op.Size(*cco.SizeInBytes)
 	}
 	if cco.StorageEngine != nil {
-		storageEngine, err := transformBsoncoreDocument(db.registry, cco.StorageEngine, true, "storageEngine")
+		storageEngine, err := marshal(cco.StorageEngine, db.bsonOpts, db.registry)
 		if err != nil {
 			return nil, err
 		}
@@ -701,7 +832,7 @@ func (db *Database) createCollectionOperation(name string, opts ...*options.Crea
 		op.ValidationLevel(*cco.ValidationLevel)
 	}
 	if cco.Validator != nil {
-		validator, err := transformBsoncoreDocument(db.registry, cco.Validator, true, "validator")
+		validator, err := marshal(cco.Validator, db.bsonOpts, db.registry)
 		if err != nil {
 			return nil, err
 		}
@@ -721,6 +852,18 @@ func (db *Database) createCollectionOperation(name string, opts ...*options.Crea
 			doc = bsoncore.AppendStringElement(doc, "granularity", *cco.TimeSeriesOptions.Granularity)
 		}
 
+		if cco.TimeSeriesOptions.BucketMaxSpan != nil {
+			bmss := int64(*cco.TimeSeriesOptions.BucketMaxSpan / time.Second)
+
+			doc = bsoncore.AppendInt64Element(doc, "bucketMaxSpanSeconds", bmss)
+		}
+
+		if cco.TimeSeriesOptions.BucketRounding != nil {
+			brs := int64(*cco.TimeSeriesOptions.BucketRounding / time.Second)
+
+			doc = bsoncore.AppendInt64Element(doc, "bucketRoundingSeconds", brs)
+		}
+
 		doc, err := bsoncore.AppendDocumentEnd(doc, idx)
 		if err != nil {
 			return nil, err
@@ -729,7 +872,7 @@ func (db *Database) createCollectionOperation(name string, opts ...*options.Crea
 		op.TimeSeries(doc)
 	}
 	if cco.ClusteredIndex != nil {
-		clusteredIndex, err := transformBsoncoreDocument(db.registry, cco.ClusteredIndex, true, "clusteredIndex")
+		clusteredIndex, err := marshal(cco.ClusteredIndex, db.bsonOpts, db.registry)
 		if err != nil {
 			return nil, err
 		}
@@ -737,6 +880,24 @@ func (db *Database) createCollectionOperation(name string, opts ...*options.Crea
 	}
 
 	return op, nil
+}
+
+// mergeCreateViewOptions combines the given CreateViewOptions instances into a single CreateViewOptions in a
+// last-property-wins fashion.
+func mergeCreateViewOptions(opts ...*options.CreateViewOptions) *options.CreateViewOptions {
+	cv := options.CreateView()
+
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+
+		if opt.Collation != nil {
+			cv.Collation = opt.Collation
+		}
+	}
+
+	return cv
 }
 
 // CreateView executes a create command to explicitly create a view on the server. See
@@ -755,7 +916,7 @@ func (db *Database) createCollectionOperation(name string, opts ...*options.Crea
 func (db *Database) CreateView(ctx context.Context, viewName, viewOn string, pipeline interface{},
 	opts ...*options.CreateViewOptions) error {
 
-	pipelineArray, _, err := transformAggregatePipeline(db.registry, pipeline)
+	pipelineArray, _, err := marshalAggregatePipeline(pipeline, db.bsonOpts, db.registry)
 	if err != nil {
 		return err
 	}
@@ -764,7 +925,7 @@ func (db *Database) CreateView(ctx context.Context, viewName, viewOn string, pip
 		ViewOn(viewOn).
 		Pipeline(pipelineArray).
 		ServerAPI(db.client.serverAPI)
-	cvo := options.MergeCreateViewOptions(opts...)
+	cvo := mergeCreateViewOptions(opts...)
 	if cvo.Collation != nil {
 		op.Collation(bsoncore.Document(cvo.Collation.ToDocument()))
 	}
@@ -775,11 +936,7 @@ func (db *Database) CreateView(ctx context.Context, viewName, viewOn string, pip
 func (db *Database) executeCreateOperation(ctx context.Context, op *operation.Create) error {
 	sess := sessionFromContext(ctx)
 	if sess == nil && db.client.sessionPool != nil {
-		var err error
-		sess, err = session.NewClientSession(db.client.sessionPool, db.client.id, session.Implicit)
-		if err != nil {
-			return err
-		}
+		sess = session.NewImplicitClientSession(db.client.sessionPool, db.client.id)
 		defer sess.EndSession()
 	}
 
@@ -792,7 +949,7 @@ func (db *Database) executeCreateOperation(ctx context.Context, op *operation.Cr
 	if sess.TransactionRunning() {
 		wc = nil
 	}
-	if !writeconcern.AckWrite(wc) {
+	if !wc.Acknowledged() {
 		sess = nil
 	}
 
@@ -807,4 +964,60 @@ func (db *Database) executeCreateOperation(ctx context.Context, op *operation.Cr
 		Crypt(db.client.cryptFLE)
 
 	return replaceErrors(op.Execute(ctx))
+}
+
+// GridFSBucket is used to construct a GridFS bucket which can be used as a
+// container for files.
+func (db *Database) GridFSBucket(opts ...*options.BucketOptions) *GridFSBucket {
+	b := &GridFSBucket{
+		name:      "fs",
+		chunkSize: DefaultGridFSChunkSize,
+		db:        db,
+	}
+
+	bo := options.GridFSBucket()
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if opt.Name != nil {
+			bo.Name = opt.Name
+		}
+		if opt.ChunkSizeBytes != nil {
+			bo.ChunkSizeBytes = opt.ChunkSizeBytes
+		}
+		if opt.WriteConcern != nil {
+			bo.WriteConcern = opt.WriteConcern
+		}
+		if opt.ReadConcern != nil {
+			bo.ReadConcern = opt.ReadConcern
+		}
+		if opt.ReadPreference != nil {
+			bo.ReadPreference = opt.ReadPreference
+		}
+	}
+	if bo.Name != nil {
+		b.name = *bo.Name
+	}
+	if bo.ChunkSizeBytes != nil {
+		b.chunkSize = *bo.ChunkSizeBytes
+	}
+	if bo.WriteConcern != nil {
+		b.wc = bo.WriteConcern
+	}
+	if bo.ReadConcern != nil {
+		b.rc = bo.ReadConcern
+	}
+	if bo.ReadPreference != nil {
+		b.rp = bo.ReadPreference
+	}
+
+	var collOpts = options.Collection().SetWriteConcern(b.wc).SetReadConcern(b.rc).SetReadPreference(b.rp)
+
+	b.chunksColl = db.Collection(b.name+".chunks", collOpts)
+	b.filesColl = db.Collection(b.name+".files", collOpts)
+	b.readBuf = make([]byte, b.chunkSize)
+	b.writeBuf = make([]byte, b.chunkSize)
+
+	return b
 }

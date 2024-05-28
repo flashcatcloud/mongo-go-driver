@@ -8,15 +8,20 @@ package driver
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/internal"
 	"go.mongodb.org/mongo-driver/mongo/description"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 )
+
+// LegacyNotPrimaryErrMsg is the error message that older MongoDB servers (see
+// SERVER-50412 for versions) return when a write operation is erroneously sent
+// to a non-primary node.
+const LegacyNotPrimaryErrMsg = "not master"
 
 var (
 	retryableCodes          = []int32{11600, 11602, 10107, 13435, 13436, 189, 91, 7, 6, 89, 9001, 262}
@@ -35,7 +40,7 @@ var (
 	TransientTransactionError = "TransientTransactionError"
 	// NetworkError is an error label for network errors.
 	NetworkError = "NetworkError"
-	// RetryableWriteError is an error lable for retryable write errors.
+	// RetryableWriteError is an error label for retryable write errors.
 	RetryableWriteError = "RetryableWriteError"
 	// NoWritesPerformed is an error label indicated that no writes were performed for an operation.
 	NoWritesPerformed = "NoWritesPerformed"
@@ -47,9 +52,12 @@ var (
 	// ErrUnsupportedStorageEngine is returned when a retryable write is attempted against a server
 	// that uses a storage engine that does not support retryable writes
 	ErrUnsupportedStorageEngine = errors.New("this MongoDB deployment does not support retryable writes. Please add retryWrites=false to your connection string")
-	// ErrDeadlineWouldBeExceeded is returned when a Timeout set on an operation would be exceeded
-	// if the operation were sent to the server.
-	ErrDeadlineWouldBeExceeded = errors.New("operation not sent to server, as Timeout would be exceeded")
+	// ErrDeadlineWouldBeExceeded is returned when a Timeout set on an operation
+	// would be exceeded if the operation were sent to the server. It wraps
+	// context.DeadlineExceeded.
+	ErrDeadlineWouldBeExceeded = fmt.Errorf(
+		"operation not sent to server, as Timeout would be exceeded: %w",
+		context.DeadlineExceeded)
 	// ErrNegativeMaxTime is returned when MaxTime on an operation is a negative value.
 	ErrNegativeMaxTime = errors.New("a negative value was provided for MaxTime on an operation")
 )
@@ -136,11 +144,9 @@ func (wce WriteCommandError) Retryable(wireVersion *description.VersionRange) bo
 
 // HasErrorLabel returns true if the error contains the specified label.
 func (wce WriteCommandError) HasErrorLabel(label string) bool {
-	if wce.Labels != nil {
-		for _, l := range wce.Labels {
-			if l == label {
-				return true
-			}
+	for _, l := range wce.Labels {
+		if l == label {
+			return true
 		}
 	}
 	return false
@@ -206,7 +212,7 @@ func (wce WriteConcernError) NotPrimary() bool {
 		}
 	}
 	hasNoCode := wce.Code == 0
-	return hasNoCode && strings.Contains(wce.Message, internal.LegacyNotPrimary)
+	return hasNoCode && strings.Contains(wce.Message, LegacyNotPrimaryErrMsg)
 }
 
 // WriteError is a non-write concern failure that occurred as a result of a write
@@ -256,10 +262,15 @@ func (e Error) UnsupportedStorageEngine() bool {
 
 // Error implements the error interface.
 func (e Error) Error() string {
+	var msg string
 	if e.Name != "" {
-		return fmt.Sprintf("(%v) %v", e.Name, e.Message)
+		msg = fmt.Sprintf("(%v)", e.Name)
 	}
-	return e.Message
+	msg += " " + e.Message
+	if e.Wrapped != nil {
+		msg += ": " + e.Wrapped.Error()
+	}
+	return msg
 }
 
 // Unwrap returns the underlying error.
@@ -269,11 +280,9 @@ func (e Error) Unwrap() error {
 
 // HasErrorLabel returns true if the error contains the specified label.
 func (e Error) HasErrorLabel(label string) bool {
-	if e.Labels != nil {
-		for _, l := range e.Labels {
-			if l == label {
-				return true
-			}
+	for _, l := range e.Labels {
+		if l == label {
+			return true
 		}
 	}
 	return false
@@ -354,7 +363,7 @@ func (e Error) NotPrimary() bool {
 		}
 	}
 	hasNoCode := e.Code == 0
-	return hasNoCode && strings.Contains(e.Message, internal.LegacyNotPrimary)
+	return hasNoCode && strings.Contains(e.Message, LegacyNotPrimaryErrMsg)
 }
 
 // NamespaceNotFound returns true if this errors is a NamespaceNotFound error.
@@ -380,16 +389,20 @@ func ExtractErrorFromServerResponse(doc bsoncore.Document) error {
 		switch elem.Key() {
 		case "ok":
 			switch elem.Value().Type {
-			case bson.TypeInt32:
+			case bsoncore.TypeInt32:
 				if elem.Value().Int32() == 1 {
 					ok = true
 				}
-			case bson.TypeInt64:
+			case bsoncore.TypeInt64:
 				if elem.Value().Int64() == 1 {
 					ok = true
 				}
-			case bson.TypeDouble:
+			case bsoncore.TypeDouble:
 				if elem.Value().Double() == 1 {
+					ok = true
+				}
+			case bsoncore.TypeBoolean:
+				if elem.Value().Boolean() {
 					ok = true
 				}
 			}

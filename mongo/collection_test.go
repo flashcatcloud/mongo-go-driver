@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
+	"go.mongodb.org/mongo-driver/internal/assert"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
@@ -46,8 +46,8 @@ func TestCollection(t *testing.T) {
 	t.Run("specified options", func(t *testing.T) {
 		rpPrimary := readpref.Primary()
 		rpSecondary := readpref.Secondary()
-		wc1 := writeconcern.New(writeconcern.W(5))
-		wc2 := writeconcern.New(writeconcern.W(10))
+		wc1 := &writeconcern.WriteConcern{W: 5}
+		wc2 := &writeconcern.WriteConcern{W: 10}
 		rcLocal := readconcern.Local()
 		rcMajority := readconcern.Majority()
 
@@ -64,7 +64,7 @@ func TestCollection(t *testing.T) {
 	t.Run("inherit options", func(t *testing.T) {
 		rpPrimary := readpref.Primary()
 		rcLocal := readconcern.Local()
-		wc1 := writeconcern.New(writeconcern.W(10))
+		wc1 := &writeconcern.WriteConcern{W: 10}
 
 		db := setupDb("foo", options.Database().SetReadPreference(rpPrimary).SetReadConcern(rcLocal))
 		coll := db.Collection("bar", options.Collection().SetWriteConcern(wc1))
@@ -110,7 +110,7 @@ func TestCollection(t *testing.T) {
 		_, err = coll.CountDocuments(bgCtx, doc)
 		assert.Equal(t, ErrClientDisconnected, err, "expected error %v, got %v", ErrClientDisconnected, err)
 
-		_, err = coll.Distinct(bgCtx, "x", doc)
+		err = coll.Distinct(bgCtx, "x", doc).Err()
 		assert.Equal(t, ErrClientDisconnected, err, "expected error %v, got %v", ErrClientDisconnected, err)
 
 		_, err = coll.Find(bgCtx, doc)
@@ -141,10 +141,13 @@ func TestCollection(t *testing.T) {
 		assert.Equal(t, ErrNilDocument, err, "expected error %v, got %v", ErrNilDocument, err)
 
 		_, err = coll.InsertMany(bgCtx, nil)
-		assert.Equal(t, ErrEmptySlice, err, "expected error %v, got %v", ErrEmptySlice, err)
+		assert.Equal(t, ErrNotSlice, err, "expected error %v, got %v", ErrNotSlice, err)
 
 		_, err = coll.InsertMany(bgCtx, []interface{}{})
 		assert.Equal(t, ErrEmptySlice, err, "expected error %v, got %v", ErrEmptySlice, err)
+
+		_, err = coll.InsertMany(bgCtx, "x")
+		assert.Equal(t, ErrNotSlice, err, "expected error %v, got %v", ErrNotSlice, err)
 
 		_, err = coll.DeleteOne(bgCtx, nil)
 		assert.Equal(t, ErrNilDocument, err, "expected error %v, got %v", ErrNilDocument, err)
@@ -173,7 +176,7 @@ func TestCollection(t *testing.T) {
 		_, err = coll.CountDocuments(bgCtx, nil)
 		assert.Equal(t, ErrNilDocument, err, "expected error %v, got %v", ErrNilDocument, err)
 
-		_, err = coll.Distinct(bgCtx, "x", nil)
+		err = coll.Distinct(bgCtx, "x", nil).Err()
 		assert.Equal(t, ErrNilDocument, err, "expected error %v, got %v", ErrNilDocument, err)
 
 		_, err = coll.Find(bgCtx, nil)
@@ -206,11 +209,108 @@ func TestCollection(t *testing.T) {
 		_, err = coll.BulkWrite(bgCtx, []WriteModel{nil})
 		assert.Equal(t, ErrNilDocument, err, "expected error %v, got %v", ErrNilDocument, err)
 
-		aggErr := errors.New("can only transform slices and arrays into aggregation pipelines, but got invalid")
+		aggErr := errors.New("can only marshal slices and arrays into aggregation pipelines, but got invalid")
 		_, err = coll.Aggregate(bgCtx, nil)
 		assert.Equal(t, aggErr, err, "expected error %v, got %v", aggErr, err)
 
 		_, err = coll.Watch(bgCtx, nil)
 		assert.Equal(t, aggErr, err, "expected error %v, got %v", aggErr, err)
 	})
+}
+
+func TestNewFindOptionsFromFindOneOptions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		opts []*options.FindOneOptions
+		want []*options.FindOptions
+	}{
+		{
+			name: "nil",
+			opts: nil,
+			want: []*options.FindOptions{
+				options.Find().SetLimit(-1),
+			},
+		},
+		{
+			name: "empty",
+			opts: []*options.FindOneOptions{},
+			want: []*options.FindOptions{
+				options.Find().SetLimit(-1),
+			},
+		},
+		{
+			name: "singleton",
+			opts: []*options.FindOneOptions{
+				options.FindOne().SetSkip(1),
+			},
+			want: []*options.FindOptions{
+				options.Find().SetSkip(1),
+				options.Find().SetLimit(-1),
+			},
+		},
+		{
+			name: "multiplicity",
+			opts: []*options.FindOneOptions{
+				options.FindOne().SetSkip(1),
+				options.FindOne().SetSkip(2),
+			},
+			want: []*options.FindOptions{
+				options.Find().SetSkip(1),
+				options.Find().SetSkip(2),
+				options.Find().SetLimit(-1),
+			},
+		},
+		{
+			name: "interior null",
+			opts: []*options.FindOneOptions{
+				options.FindOne().SetSkip(1),
+				nil,
+				options.FindOne().SetSkip(2),
+			},
+			want: []*options.FindOptions{
+				options.Find().SetSkip(1),
+				options.Find().SetSkip(2),
+				options.Find().SetLimit(-1),
+			},
+		},
+		{
+			name: "start null",
+			opts: []*options.FindOneOptions{
+				nil,
+				options.FindOne().SetSkip(1),
+				options.FindOne().SetSkip(2),
+			},
+			want: []*options.FindOptions{
+				options.Find().SetSkip(1),
+				options.Find().SetSkip(2),
+				options.Find().SetLimit(-1),
+			},
+		},
+		{
+			name: "end null",
+			opts: []*options.FindOneOptions{
+				options.FindOne().SetSkip(1),
+				options.FindOne().SetSkip(2),
+				nil,
+			},
+			want: []*options.FindOptions{
+				options.Find().SetSkip(1),
+				options.Find().SetSkip(2),
+				options.Find().SetLimit(-1),
+			},
+		},
+	}
+
+	for _, test := range tests {
+		test := test // Capture the range variable
+
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := newFindOptionsFromFindOneOptions(test.opts...)
+			assert.Equal(t, test.want, got)
+		})
+	}
 }

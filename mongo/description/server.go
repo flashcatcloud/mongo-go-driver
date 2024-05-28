@@ -12,8 +12,9 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/internal"
+	"go.mongodb.org/mongo-driver/internal/bsonutil"
+	"go.mongodb.org/mongo-driver/internal/handshake"
+	"go.mongodb.org/mongo-driver/internal/ptrutil"
 	"go.mongodb.org/mongo-driver/mongo/address"
 	"go.mongodb.org/mongo-driver/tag"
 )
@@ -36,7 +37,7 @@ type Server struct {
 	AverageRTTSet         bool
 	Compression           []string // compression methods returned by server
 	CanonicalAddr         address.Address
-	ElectionID            primitive.ObjectID
+	ElectionID            bson.ObjectID
 	HeartbeatInterval     time.Duration
 	HelloOK               bool
 	Hosts                 []string
@@ -52,8 +53,8 @@ type Server struct {
 	Passive               bool
 	Primary               address.Address
 	ReadOnly              bool
-	ServiceID             *primitive.ObjectID // Only set for servers that are deployed behind a load balancer.
-	SessionTimeoutMinutes uint32
+	ServiceID             *bson.ObjectID // Only set for servers that are deployed behind a load balancer.
+	SessionTimeoutMinutes *int64
 	SetName               string
 	SetVersion            uint32
 	Tags                  tag.Set
@@ -78,7 +79,7 @@ func NewServer(addr address.Address, response bson.Raw) Server {
 		switch element.Key() {
 		case "arbiters":
 			var err error
-			desc.Arbiters, err = internal.StringSliceFromRawElement(element)
+			desc.Arbiters, err = stringSliceFromRawElement(element)
 			if err != nil {
 				desc.LastError = err
 				return desc
@@ -91,7 +92,7 @@ func NewServer(addr address.Address, response bson.Raw) Server {
 			}
 		case "compression":
 			var err error
-			desc.Compression, err = internal.StringSliceFromRawElement(element)
+			desc.Compression, err = stringSliceFromRawElement(element)
 			if err != nil {
 				desc.LastError = err
 				return desc
@@ -122,7 +123,7 @@ func NewServer(addr address.Address, response bson.Raw) Server {
 			}
 		case "hosts":
 			var err error
-			desc.Hosts, err = internal.StringSliceFromRawElement(element)
+			desc.Hosts, err = stringSliceFromRawElement(element)
 			if err != nil {
 				desc.LastError = err
 				return desc
@@ -133,7 +134,7 @@ func NewServer(addr address.Address, response bson.Raw) Server {
 				desc.LastError = fmt.Errorf("expected 'isWritablePrimary' to be a boolean but it's a BSON %s", element.Value().Type)
 				return desc
 			}
-		case internal.LegacyHelloLowercase:
+		case handshake.LegacyHelloLowercase:
 			isWritablePrimary, ok = element.Value().BooleanOK()
 			if !ok {
 				desc.LastError = fmt.Errorf("expected legacy hello to be a boolean but it's a BSON %s", element.Value().Type)
@@ -166,7 +167,8 @@ func NewServer(addr address.Address, response bson.Raw) Server {
 				desc.LastError = fmt.Errorf("expected 'logicalSessionTimeoutMinutes' to be an integer but it's a BSON %s", element.Value().Type)
 				return desc
 			}
-			desc.SessionTimeoutMinutes = uint32(i64)
+
+			desc.SessionTimeoutMinutes = &i64
 		case "maxBsonObjectSize":
 			i64, ok := element.Value().AsInt64OK()
 			if !ok {
@@ -196,13 +198,15 @@ func NewServer(addr address.Address, response bson.Raw) Server {
 			}
 			desc.CanonicalAddr = address.Address(me).Canonicalize()
 		case "maxWireVersion":
-			versionRange.Max, ok = element.Value().AsInt32OK()
+			verMax, ok := element.Value().AsInt64OK()
+			versionRange.Max = int32(verMax)
 			if !ok {
 				desc.LastError = fmt.Errorf("expected 'maxWireVersion' to be an integer but it's a BSON %s", element.Value().Type)
 				return desc
 			}
 		case "minWireVersion":
-			versionRange.Min, ok = element.Value().AsInt32OK()
+			verMin, ok := element.Value().AsInt64OK()
+			versionRange.Min = int32(verMin)
 			if !ok {
 				desc.LastError = fmt.Errorf("expected 'minWireVersion' to be an integer but it's a BSON %s", element.Value().Type)
 				return desc
@@ -214,7 +218,7 @@ func NewServer(addr address.Address, response bson.Raw) Server {
 				return desc
 			}
 		case "ok":
-			okay, ok := element.Value().AsInt32OK()
+			okay, ok := element.Value().AsInt64OK()
 			if !ok {
 				desc.LastError = fmt.Errorf("expected 'ok' to be a boolean but it's a BSON %s", element.Value().Type)
 				return desc
@@ -225,7 +229,7 @@ func NewServer(addr address.Address, response bson.Raw) Server {
 			}
 		case "passives":
 			var err error
-			desc.Passives, err = internal.StringSliceFromRawElement(element)
+			desc.Passives, err = stringSliceFromRawElement(element)
 			if err != nil {
 				desc.LastError = err
 				return desc
@@ -462,7 +466,7 @@ func (s Server) Equal(other Server) bool {
 		return false
 	}
 
-	if s.SessionTimeoutMinutes != other.SessionTimeoutMinutes {
+	if ptrutil.CompareInt64(s.SessionTimeoutMinutes, other.SessionTimeoutMinutes) != 0 {
 		return false
 	}
 
@@ -485,4 +489,12 @@ func sliceStringEqual(a []string, b []string) bool {
 		}
 	}
 	return true
+}
+
+// stringSliceFromRawElement decodes the provided BSON element into a []string.
+// This internally calls StringSliceFromRawValue on the element's value. The
+// error conditions outlined in that function's documentation apply for this
+// function as well.
+func stringSliceFromRawElement(element bson.RawElement) ([]string, error) {
+	return bsonutil.StringSliceFromRawValue(element.Key(), element.Value())
 }
